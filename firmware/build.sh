@@ -29,6 +29,14 @@ OUT_DIR="${OUT_DIR:-$FW_DIR/output}"
 # (23.05 names: firewall4 + odhcp6c; plain -firewall/-odhcpd match nothing.)
 PACKAGES="iw tcpdump-mini -ppp -ppp-mod-pppoe -firewall4 -odhcpd-ipv6only -odhcp6c -kmod-ipv6"
 
+# ImageBuilder copies files/ verbatim but does NOT chmod them automatically.
+# Init scripts in etc/init.d/ must be executable on the target filesystem.
+# We set exec bits here before the make call so they land correctly in squashfs.
+chmod +x "$FW_DIR/files/etc/init.d/"* 2>/dev/null || true
+# The uci-defaults script is sourced by sh (not exec'd directly), but making it
+# executable documents intent and is harmless.
+chmod +x "$FW_DIR/files/etc/uci-defaults/"* 2>/dev/null || true
+
 mkdir -p "$WORK_DIR" "$OUT_DIR"
 cd "$WORK_DIR"
 
@@ -40,7 +48,7 @@ fi
 echo "[*] Verifying sha256..."
 echo "${IB_SHA256}  ${IB_TARBALL}" | sha256sum -c -
 
-IB_DIR="${IB_TARBALL%.tar.xz}"
+IB_DIR="$WORK_DIR/${IB_TARBALL%.tar.xz}"
 if [ ! -d "$IB_DIR" ]; then
     echo "[*] Extracting ImageBuilder..."
     tar -xf "$IB_TARBALL"
@@ -57,8 +65,71 @@ make image PROFILE="$PROFILE" PACKAGES="$PACKAGES" FILES="$FW_DIR/files/" \
 echo "[*] Collecting output..."
 SYSUPGRADE="$(ls "$IB_BIN_DIR/"*sysupgrade.bin | head -n 1)"
 cp "$SYSUPGRADE" "$OUT_DIR/pwn4c-firmware-mi4c-sysupgrade.bin"
+
+# ── Rootfs size guard (4 MB budget) ────────────────────────────────────────
+# Measure the TRUE root filesystem (root.squashfs), NOT the combined
+# sysupgrade image (kernel + rootfs, ~5.5 MB). The "*squashfs-sysupgrade.bin"
+# name matches the combined image — measuring it against the 4 MB budget
+# would fail every build. root.squashfs lives in the ImageBuilder tree
+# (BIN_DIR only gets the combined images).
+ROOTFS="$(ls "$IB_DIR"/build_dir/target-*/linux-*/root.squashfs 2>/dev/null | head -n 1)"
+if [ -z "$ROOTFS" ]; then
+    ROOTFS="$(ls "$IB_BIN_DIR/"*root.squashfs 2>/dev/null | head -n 1)"
+fi
+if [ -z "$ROOTFS" ]; then
+    echo "[ERROR] root.squashfs not found under $IB_DIR" >&2
+    exit 1
+fi
+ROOTFS_BYTES="$(wc -c < "$ROOTFS")"
+SYSUPGRADE_BYTES="$(wc -c < "$SYSUPGRADE")"
+BUDGET_BYTES=4194304  # 4 MB
+
+echo ""
+echo "══ Size report ═══════════════════════════════════════════════"
+echo "  Rootfs (budgeted) : ${ROOTFS_BYTES} bytes"
+echo "  Sysupgrade (info) : ${SYSUPGRADE_BYTES} bytes"
+echo "  Budget            : ${BUDGET_BYTES} bytes (4 MB)"
+echo "══════════════════════════════════════════════════════════════"
+
+if [ "$ROOTFS_BYTES" -gt "$BUDGET_BYTES" ]; then
+    echo "[ERROR] rootfs exceeds 4 MB budget." >&2
+    exit 1
+fi
+
+# ── Package manifest assertions ────────────────────────────────────────────
+MANIFEST="$IB_BIN_DIR/$(ls "$IB_BIN_DIR/" | grep '\.manifest$' | head -n 1)"
+if [ -f "$MANIFEST" ]; then
+    echo ""
+    echo "── Package manifest checks ──────────────────────────────────"
+    for req in iw tcpdump-mini dropbear dnsmasq kmod-mac80211; do
+        if grep -q "^${req}" "$MANIFEST"; then
+            echo "  [PASS] ${req} present"
+        else
+            echo "  [FAIL] ${req} MISSING from manifest"
+            BUILD_FAIL=1
+        fi
+    done
+    for banned in luci firewall4 ppp kmod-ipv6 odhcp6c odhcpd-ipv6only; do
+        if grep -q "^${banned}" "$MANIFEST"; then
+            echo "  [FAIL] ${banned} present (should be excluded)"
+            BUILD_FAIL=1
+        else
+            echo "  [PASS] ${banned} absent"
+        fi
+    done
+    echo "─────────────────────────────────────────────────────────────"
+else
+    echo "[!] No manifest file found in $IB_BIN_DIR — skipping package checks"
+fi
+
 cd "$OUT_DIR"
 sha256sum pwn4c-firmware-mi4c-sysupgrade.bin > checksums.sha256
 ls -l pwn4c-firmware-mi4c-sysupgrade.bin
 cat checksums.sha256
+
+# Fail hard if any assertion failed.
+if [ -n "${BUILD_FAIL:-}" ]; then
+    echo "[ERROR] One or more build assertions failed." >&2
+    exit 1
+fi
 echo "[+] Done: $OUT_DIR/pwn4c-firmware-mi4c-sysupgrade.bin"

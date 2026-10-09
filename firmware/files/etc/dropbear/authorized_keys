@@ -1,0 +1,24 @@
+# Pwn4C drone – SSH authorized keys
+#
+# DEFAULT: empty (no pre-installed key). The drone ships with NO root password
+# and NO authorized keys. The automation workflow must push a key before
+# deploying to an untrusted network.
+#
+# HOW TO ADD A KEY (choose one):
+#
+#   A) Via the initial passwordless session (post-infect, pre-deployment):
+#      ssh-copy-id -i ~/.ssh/id_ed25519.pub root@192.168.4.1
+#
+#   B) Via SCP:
+#      scp ~/.ssh/id_ed25519.pub root@192.168.4.1:/etc/dropbear/authorized_keys
+#      ssh root@192.168.4.1 "chmod 600 /etc/dropbear/authorized_keys"
+#
+#   C) Bake a key into the image (team deployments):
+#      Copy your public key into:
+#        firmware/files/etc/dropbear/authorized_keys
+#      and rebuild the image. The key will land here at bake time.
+#      WARNING: keys baked into a public repository are public. Use a
+#      deployment-only key pair and rotate regularly.
+#
+# After adding a key, set a strong root password to disable passwordless login:
+#   ssh root@192.168.4.1 "passwd root"

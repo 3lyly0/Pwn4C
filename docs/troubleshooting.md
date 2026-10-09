@@ -462,6 +462,62 @@ ssh root@192.168.4.1 "logread | grep pwn4cd"
 
 ---
 
+## SSH Credential Policy and Non-Interactive Access
+
+### Default State
+
+The Pwn4C drone ships with **no root password and no authorized keys**. This
+matches the OpenWrt first-boot default: telnet is available on port 23 until a
+password is set.
+
+| Condition | Telnet (23) | SSH (22) |
+|-----------|------------|----------|
+| No password, no authorized_keys | Open | Refused — nothing to authenticate against (set a password or key first) |
+| Password set, no authorized_keys | Closed | Password auth |
+| No password, authorized_keys present | Closed | Key auth |
+| Password + authorized_keys | Closed | Key auth (password also works) |
+
+> [!CAUTION]
+> Deploy a drone without credentials only on air-gapped or physically controlled
+> networks. On any shared network, set a password or install an authorized key
+> **before** operational use.
+
+### Setting Up Non-Interactive SSH for Automation
+
+The host CLI (`pwn4c`) uses SSH for the `infect`→flash sequence. For
+non-interactive (passwordless) access:
+
+```bash
+# Generate a deployment key pair (one-time):
+ssh-keygen -t ed25519 -f ~/.ssh/pwn4c_deploy -N "" -C "pwn4c-deploy"
+
+# Push the public key over the initial passwordless session:
+ssh-copy-id -i ~/.ssh/pwn4c_deploy.pub -o StrictHostKeyChecking=no \
+    root@192.168.4.1
+
+# Verify:
+ssh -i ~/.ssh/pwn4c_deploy -o StrictHostKeyChecking=no root@192.168.4.1 "id"
+```
+
+The key persists across `sysupgrade` because `/etc/dropbear/authorized_keys`
+is listed in `/etc/sysupgrade.conf`.
+
+### Changing the Root Password
+
+```bash
+ssh root@192.168.4.1 "passwd root"
+# Enter new password twice.
+# Once set, telnet is disabled (OpenWrt default behaviour).
+```
+
+To revert to no-password (re-enable telnet for recovery):
+
+```bash
+ssh root@192.168.4.1 "passwd -d root"
+```
+
+---
+
 ## Quick Reference
 
 | Issue | Command | Expected |
