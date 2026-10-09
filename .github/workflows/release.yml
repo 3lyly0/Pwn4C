@@ -97,8 +97,25 @@ jobs:
           sha256sum * > checksums.sha256
           cat checksums.sha256
 
+      - name: Beta notice
+        run: |
+          if [[ "${{ github.ref_name }}" == *beta* ]]; then
+            printf '%s\n' \
+              '> [!WARNING]' \
+              '> **Beta / minimal build — NOT working yet.**' \
+              '>' \
+              '> This is an early minimal snapshot: the `infect` flow (root shell) works,' \
+              '> but `discover` / `monitor` / `status` are stubs, the `pwn4cd` drone' \
+              '> daemon is not written yet, and auto-flash is not implemented.' \
+              '> For evaluation only — wait for a stable release for real use.' > NOTE.md
+          else
+            touch NOTE.md
+          fi
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          body_path: NOTE.md
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, 'beta') }}
