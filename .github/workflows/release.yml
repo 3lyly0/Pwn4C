@@ -94,7 +94,8 @@ jobs:
       - name: Checksums
         run: |
           cd dist
-          sha256sum * > checksums.sha256
+          rm -f checksums.sha256
+          find . -maxdepth 1 -type f -exec sha256sum {} + > checksums.sha256
           cat checksums.sha256
 
       - name: Beta notice
