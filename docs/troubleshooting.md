@@ -150,6 +150,21 @@ ssh root@192.168.4.1 "logread | grep pwn4cd"
 
 **Fix:** Same as above. Fall back to Path B.
 
+### `router rejected archive: code=1629` (解压失败，可能文件已经损坏)
+
+```
+[!] WARNING: router reported upload code=1629 msg=解压失败，可能文件已经损坏
+```
+
+**Cause:** This is returned by the router's `c_upload` endpoint itself, not by `pwn4c`'s payload construction. Verified: even a trivial hand-made `tar.gz` (single 12-byte text file, USTAR/PAX/GNU, with or without inner `Content-Type`) uploaded with stock `python-requests` gets the same `1629` on affected firmware. Known-affected: R4CM (Mi Router 4C) on `2.14.502` (latest release channel; supported versions stop at `2.14.92`). Same pattern as the 4A Gigabit on `2.30.20`, where Xiaomi changed the upload/speedtest handling server-side. Your tarball is almost certainly fine — the firmware refuses all archives.
+
+**Fix:**
+1. Confirm your firmware at `http://192.168.31.1` (or `api/misystem/status` → `hardware.version`). If it is newer than the last known-vulnerable build for your model, the CVE-2019-18370 upload path is closed.
+2. Downgrade to a vulnerable build (4C: `2.14.75`–`2.14.92`, or Global `3.0.23` per community reports), then re-run `pwn4c infect`. Note the stock web UI usually rejects downgrade images at file-check, so use the Xiaomi Repair Tool / `mtd write` route (see OpenWrt wiki for the 4C) or UART.
+3. Alternatively try a newer exploit primitive for your model/firmware (e.g. the `get_icon` vector used by community patcher tools), or fall back to Path B (TFTP/UART flash).
+
+**Note:** `pwn4c infect` deliberately does not abort on `1629` — like upstream OpenWRTInvasion, it still runs the `netspeed` trigger and then verifies ports 23/22, so a partially-working target still gets detected.
+
 ### `SSH connection refused after injection`
 
 ```
