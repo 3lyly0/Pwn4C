@@ -1,0 +1,104 @@
+name: Release
+
+# Cut a release by tagging:  git tag v0.1.0 && git push origin v0.1.0
+# Attaches the cross-compiled CLI binaries AND the OpenWrt image
+# (plus checksums) to a single GitHub Release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  tool:
+    name: Build CLI (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {goos: windows, goarch: amd64, ext: .exe}
+          - {goos: linux, goarch: amd64, ext: ''}
+          - {goos: linux, goarch: arm64, ext: ''}
+          - {goos: darwin, goarch: amd64, ext: ''}
+          - {goos: darwin, goarch: arm64, ext: ''}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go build -ldflags="-s -w" -o "dist/pwn4c-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./cmd/pwn4c
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-tool-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+          retention-days: 30
+
+  firmware:
+    name: Build image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ImageBuilder dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential curl file gawk gettext git libncurses-dev libssl-dev \
+            python3 rsync unzip wget zlib1g-dev ca-certificates
+
+      - name: Cache ImageBuilder tree
+        uses: actions/cache@v4
+        with:
+          path: ~/ib-work
+          key: imagebuilder-23.05.5-ramips-mt76x8
+
+      - name: Build
+        run: |
+          mkdir -p ~/ib-work dist-firmware
+          WORK_DIR="$HOME/ib-work" OUT_DIR="$GITHUB_WORKSPACE/dist-firmware" sh firmware/build.sh
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-firmware
+          path: dist-firmware/
+          retention-days: 30
+
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [tool, firmware]
+    steps:
+      - name: Collect artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > checksums.sha256
+          cat checksums.sha256
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

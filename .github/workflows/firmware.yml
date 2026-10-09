@@ -1,0 +1,43 @@
+name: Firmware
+
+# Rebuilds the OpenWrt image whenever firmware sources change.
+# Result is kept as a downloadable Artifact (see the Release workflow
+# for tagged releases).
+on:
+  push:
+    branches: [main]
+    paths: ['firmware/**', '.github/workflows/firmware.yml']
+  pull_request:
+    paths: ['firmware/**', '.github/workflows/firmware.yml']
+
+jobs:
+  build:
+    name: Build image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ImageBuilder dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential curl file gawk gettext git libncurses-dev libssl-dev \
+            python3 rsync unzip wget zlib1g-dev ca-certificates
+
+      - name: Cache ImageBuilder tree
+        uses: actions/cache@v4
+        with:
+          path: ~/ib-work
+          key: imagebuilder-23.05.5-ramips-mt76x8
+
+      - name: Build
+        run: |
+          mkdir -p ~/ib-work dist
+          WORK_DIR="$HOME/ib-work" OUT_DIR="$GITHUB_WORKSPACE/dist" sh firmware/build.sh
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pwn4c-firmware
+          path: dist/
+          retention-days: 30
