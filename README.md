@@ -1,5 +1,7 @@
 # Pwn4C
 
+[![CI](https://github.com/3lyly0/Pwn4C/actions/workflows/ci.yml/badge.svg)](https://github.com/3lyly0/Pwn4C/actions/workflows/ci.yml)
+
 <img src="assets/router_drone.png" alt="Xiaomi Mi Router 4C" align="left" width="260">
 
 Pwn4C converts a stock Xiaomi Mi Router 4C (MediaTek MT7628N, $15 USD) into a headless Wi-Fi penetration testing implant. It exploits CVE-2019-18370/18371 to silently deploy a custom OpenWrt firmware (<4MB) over the LAN in under 90 seconds, turning the router into a remote RF drone controlled from a host PC over Ethernet.
