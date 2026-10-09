@@ -7,6 +7,9 @@ cmd/pwn4c/pwn4c.exe
 # Stock / generated firmware images (large, downloadable from Xiaomi)
 firmware/*.bin
 
+# ImageBuilder scratch tree (large, re-downloadable)
+firmware/.ib-work/
+
 # Exploit payload artifacts (rebuilt on every infect run)
 *.tar.gz
 *.tar.bz2
