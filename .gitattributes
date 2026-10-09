@@ -1,2 +1,10 @@
 # Normalize line endings on checkout/commit (Windows + Linux contributors)
 * text=auto
+
+# Go sources, shell scripts and workflows must stay LF everywhere:
+# gofmt rejects CRLF, which is what `text=auto` alone would check out
+# on Windows and break the CI fmt job there.
+*.go text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
