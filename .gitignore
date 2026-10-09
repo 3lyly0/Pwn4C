@@ -1,0 +1,27 @@
+# Built binaries (anchored: never match the cmd/pwn4c source dir itself)
+/pwn4c.exe
+/pwn4c
+cmd/pwn4c/pwn4c
+cmd/pwn4c/pwn4c.exe
+
+# Stock / generated firmware images (large, downloadable from Xiaomi)
+firmware/*.bin
+
+# Exploit payload artifacts (rebuilt on every infect run)
+*.tar.gz
+*.tar.bz2
+build/
+output/
+
+# Runtime captures / logs
+*.pcap
+*.log
+
+# Go
+/vendor/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
