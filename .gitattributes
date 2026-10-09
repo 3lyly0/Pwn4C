@@ -8,3 +8,6 @@
 *.sh text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+# Overlay files land on a Linux target (ash chokes on CRLF), and these
+# init/uci-defaults scripts have no .sh extension to match above.
+firmware/files/** text eol=lf

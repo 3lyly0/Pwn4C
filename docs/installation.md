@@ -96,7 +96,18 @@ Expected output (success):
 
 > **Note on `code 1629`:** some firmware (e.g. Global `3.0.23`) answers the upload with `{"code":1629,"msg":"解压失败..."}` **and still extracts + executes the payload**. `infect` therefore treats a non-zero upload code as a warning, continues to the trigger stage, and lets the port check decide. Only if ports 23/22 stay closed is the run reported as failed (usually: patched firmware — see below). Details in [troubleshooting.md](troubleshooting.md#router-rejected-archive-code1629-解压失败可能文件已经损坏).
 
-> **Current scope:** `infect` ends with a verified **root shell** (telnet/SSH). Flashing the Pwn4C OpenWrt image (`mtd write`, reboot, discovery on `192.168.4.0/24`) is the next stage and is not automated yet.
+> **Current scope (Path A):** `infect` ends with a verified **root shell** (telnet/SSH on the stock Xiaomi firmware).
+> The next manual step is to flash the Pwn4C OpenWrt image from that shell:
+> ```bash
+> # From telnet 192.168.31.1 (root/root):
+> # 1. On the host, serve the sysupgrade image:
+> python3 -m http.server 8080 --directory ./firmware/output/
+> # 2. On the router (telnet):
+> wget http://<host-ip>:8080/pwn4c-firmware-mi4c-sysupgrade.bin -O /tmp/pwn4c.bin
+> mtd -r write /tmp/pwn4c.bin OS1
+> # Router reboots into Pwn4C OS. Reconnect on 192.168.4.0/24.
+> ```
+> Full automation of the flash+reboot+discovery sequence is planned for a future release.
 
 ### A.3 Post-Infection Network Setup
 
@@ -153,8 +164,8 @@ The output directory will contain:
 
 ```
 output/
-  pwn4c-firmware-mi4c.bin      # Flashable firmware image
-  checksums.sha256             # Integrity hashes
+  pwn4c-firmware-mi4c-sysupgrade.bin   # Sysupgrade flashable image
+  checksums.sha256                      # Integrity hash
 ```
 
 To build without Docker, install the OpenWrt ImageBuilder for `ramips/mt76x8` manually and run:

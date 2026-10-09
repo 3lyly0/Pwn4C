@@ -1,0 +1,29 @@
+#!/bin/sh /etc/rc.common
+# /etc/init.d/pwn4c-radio
+# Boot-safety guard: ensure the wireless interface is administratively DOWN on
+# every boot.  The pwn4cd daemon will bring it up and put it in monitor mode
+# on demand.  Leaving the radio up without a daemon risks spurious beaconing or
+# association attempts.
+#
+# Priority 21 (after network=20, so interface names exist and any auto-bring-up
+# has happened; before wpad=95 so the disabled flag is respected).
+
+START=21
+STOP=89
+USE_PROCD=0
+
+start() {
+    # Disable the wireless interface via UCI and bring the physical layer down.
+    # wifi down is the standard OpenWrt call; it reads /etc/config/wireless.
+    logger -t pwn4c-radio "Disabling wireless interface (daemon will enable on demand)"
+    wifi down 2>/dev/null || true
+
+    # Belt-and-suspenders: also mark UCI disabled so future wifi reload calls
+    # do not inadvertently bring it up.
+    uci set wireless.radio0.disabled='1' 2>/dev/null && uci commit wireless 2>/dev/null || true
+}
+
+stop() {
+    # No action needed: when the system shuts down the interfaces go down anyway.
+    return 0
+}

@@ -212,7 +212,13 @@ The following standard OpenWrt packages are deliberately removed:
 | LuCI web interface | ~4.0 MB | No web UI; Drone is headless |
 | IPv6 stack (`kmod-ipv6`, `odhcp6c`) | ~0.5 MB | Ethernet link is IPv4-only |
 | PPPoE / 3G / LTE modules | ~0.3 MB | No WAN connectivity |
-| `dnsmasq` | ~0.3 MB | No DHCP/DNS server role |
 | `firewall` (iptables/nftables) | ~0.4 MB | No routing; direct link only |
 | `opkg` package manager | ~0.1 MB | No runtime package installation |
 | USB / storage modules | ~0.2 MB | No USB hardware on R4CM |
+
+> [!NOTE]
+> `dnsmasq` is **kept** in the image. The Drone acts as DHCP server on
+> `192.168.4.0/24` so the Host receives an address automatically when connected
+> to any LAN port. Removing dnsmasq would require a static-IP workflow on every
+> Host, breaking zero-touch discovery.
+
