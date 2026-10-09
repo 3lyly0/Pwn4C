@@ -1,0 +1,9 @@
+# First-boot customization for the Pwn4C drone (applied by ImageBuilder).
+# Runs once via OpenWrt's uci-defaults mechanism.
+uci set system.@system[0].hostname='pwn4c'
+uci set network.lan.ipaddr='192.168.4.1'
+uci set network.lan.netmask='255.255.255.0'
+uci commit
+# NOTE: no root password is set here (OpenWrt default). First boot offers
+# telnet; the stage-2 flash flow sets credentials before deployment.
+exit 0
