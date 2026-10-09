@@ -48,8 +48,10 @@ fi
 
 echo "[*] Building image for PROFILE=${PROFILE}..."
 cd "$IB_DIR"
+# NOTE: intermediates stay in WORK_DIR; OUT_DIR receives only the final
+# image + checksums (keeps artifacts and releases clean).
 make image PROFILE="$PROFILE" PACKAGES="$PACKAGES" FILES="$FW_DIR/files/" \
-    EXTRA_IMAGE_NAME="pwn4c" BIN_DIR="$OUT_DIR/imagebuilder-bin"
+    EXTRA_IMAGE_NAME="pwn4c" BIN_DIR="$WORK_DIR/imagebuilder-bin"
 
 echo "[*] Collecting output..."
 SYSUPGRADE="$(ls "$OUT_DIR/imagebuilder-bin/"*sysupgrade.bin | head -n 1)"
