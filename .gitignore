@@ -10,6 +10,10 @@ firmware/*.bin
 # ImageBuilder scratch tree (large, re-downloadable)
 firmware/.ib-work/
 
+# Baked-in daemon binary + init script (CI build outputs, not sources)
+firmware/files/usr/sbin/
+firmware/files/etc/init.d/pwn4cd
+
 # Exploit payload artifacts (rebuilt on every infect run)
 *.tar.gz
 *.tar.bz2

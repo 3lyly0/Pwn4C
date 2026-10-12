@@ -1,0 +1,46 @@
+name: Setup OpenWrt SDK
+description: >-
+  Restore (cache) or download, verify and extract the ramips/mt76x8 SDK
+  used to cross-compile the pwn4cd daemon.
+inputs:
+  dest:
+    description: Directory holding the SDK tarball and tree (defaults to runner temp)
+    default: ${{ runner.temp }}/sdk-openwrt
+    required: false
+outputs:
+  sdk-dir:
+    description: Extracted SDK root for SDK_DIR=
+    value: ${{ inputs.dest }}/openwrt-sdk-23.05.5-ramips-mt76x8_gcc-12.3.0_musl.Linux-x86_64
+runs:
+  using: composite
+  steps:
+    - name: Cache SDK
+      uses: actions/cache@v4
+      with:
+        path: ${{ inputs.dest }}
+        key: sdk-23.05.5-ramips-mt76x8
+
+    - name: Fetch, verify, extract
+      shell: bash
+      run: |
+        set -eu
+        DEST='${{ inputs.dest }}'
+        TB='openwrt-sdk-23.05.5-ramips-mt76x8_gcc-12.3.0_musl.Linux-x86_64.tar.xz'
+        URL="https://downloads.openwrt.org/releases/23.05.5/targets/ramips/mt76x8/$TB"
+        SHA='d3fc656e5ecc5099f16379860582c22fd57b9e03a81521b17c9ad31034cde1c0'
+        SDK_EXTRACTED="$DEST/${TB%.tar.xz}"
+
+        mkdir -p "$DEST"
+        if [ ! -d "$SDK_EXTRACTED" ]; then
+          if [ ! -f "$DEST/$TB" ]; then
+            echo "[*] Downloading OpenWrt SDK..."
+            wget -q -O "$DEST/$TB" "$URL"
+          fi
+          echo "[*] Verifying SHA256 checksum..."
+          echo "$SHA  $DEST/$TB" | sha256sum -c -
+          echo "[*] Extracting SDK..."
+          tar -xf "$DEST/$TB" -C "$DEST"
+        else
+          echo "[*] SDK already extracted and cached at $SDK_EXTRACTED"
+        fi
+        echo "SDK ready at: $SDK_EXTRACTED"
