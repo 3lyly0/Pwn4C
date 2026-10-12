@@ -280,6 +280,39 @@ Stops monitor mode and halts the frame stream.
 
 ---
 
+#### `RESTORE_NORMAL` (Pwn4C extension)
+
+One-command path back to regular networking (dual-use escape hatch). Stops
+monitor/injection if active, then re-enables the managed/AP radio via the
+untouched UCI wireless profile. Works from any state, including while
+monitoring — the box is always recoverable to normal internet use without
+serial access.
+
+**Request:**
+
+```json
+{
+  "id": "cmd-004",
+  "command": "RESTORE_NORMAL",
+  "params": {}
+}
+```
+
+**Response:**
+
+```json
+{
+  "id": "cmd-004",
+  "status": "ok",
+  "data": {
+    "mode": "normal",
+    "monitor_active": false
+  }
+}
+```
+
+---
+
 #### `SET_CHANNEL`
 
 Switches the radio to a different channel while monitor mode is active.
