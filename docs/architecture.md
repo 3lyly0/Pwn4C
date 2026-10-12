@@ -280,3 +280,74 @@ Binary size: ~48KB stripped
 ```
 
 The resulting static binary is embedded directly into the OpenWrt rootfs image during the firmware build.
+
+---
+
+## Radio Mode Machine
+
+This section documents the dual-use radio state machine introduced in `pwn4cd` v0.1.0.
+
+### Design Principle
+
+The drone hardware is **shared between two use modes**:
+
+| Mode | Who controls | Purpose |
+|------|-------------|---------|
+| `NORMAL` | UCI wireless stack (hostapd/wpa_supplicant) | Regular AP/client networking |
+| `MONITOR` | `pwn4cd` (AF_PACKET socket) | Implant: frame capture + injection |
+| `DOWN` | Boot safety guard (`pwn4c-radio`, START=21) | Safe default — no beaconing |
+
+**Key invariant**: Entering monitor mode is always reversible with a single `STOP_MONITOR` command. The radio is never left in a state that requires serial-console recovery.
+
+### States
+
+| State | Radio condition | Managed by |
+|-------|----------------|------------|
+| `DOWN` | `ip link down`, UCI `disabled=1` | `pwn4c-radio` init script |
+| `NORMAL` | UCI `disabled=0`, `wifi up` running | hostapd / wpa_supplicant |
+| `MONITOR` | `iw set type monitor`, `ip link up`, UCI irrelevant | `pwn4cd` AF_PACKET socket |
+
+### Transitions
+
+```mermaid
+stateDiagram-v2
+    [*] --> DOWN : Boot (pwn4c-radio START=21)
+
+    DOWN --> MONITOR : START_MONITOR command
+    DOWN --> NORMAL : RESTORE_NORMAL command
+
+    NORMAL --> MONITOR : START_MONITOR command\n(saves NORMAL as pre-state)
+    MONITOR --> NORMAL : RESTORE_NORMAL command\nor STOP_MONITOR (pre-state was NORMAL)
+    MONITOR --> DOWN : STOP_MONITOR (pre-state was DOWN)\nor TCP client disconnect
+    NORMAL --> DOWN : radio_set_down()
+```
+
+### Transition Rules
+
+1. **`DOWN → MONITOR`**: `radio_enter_monitor()` saves pre-state `DOWN`, runs `wifi down`, sets `iw type monitor`, brings link up, sets channel.
+2. **`NORMAL → MONITOR`**: Same as above, but saves pre-state `NORMAL` so restoration brings the managed stack back.
+3. **`MONITOR → NORMAL`**: `radio_exit_monitor()` sees saved pre-state `NORMAL`, calls `radio_restore_normal()`: flips UCI `disabled=0`, calls `wifi up`. **UCI AP profile is never deleted** — only the `disabled` flag is toggled.
+4. **`MONITOR → DOWN`**: `radio_exit_monitor()` sees saved pre-state `DOWN`, brings link down, sets UCI `disabled=1`. No managed stack is started.
+5. **TCP disconnect while MONITOR**: Daemon automatically calls `radio_exit_monitor()` — identical to `STOP_MONITOR`. The operator is never left with a stuck radio.
+6. **SIGTERM**: Same cleanup path as TCP disconnect. Exit code 0.
+
+### UCI Profile Safety
+
+The following operations are **explicitly forbidden** to prevent destroying the AP configuration:
+
+- ❌ `uci delete wireless.radio0` — never executed
+- ❌ `uci delete wireless.default_radio0` — never executed
+- ❌ Overwriting `ssid`, `encryption`, `key`, `mode` — never executed
+
+Only `wireless.radio0.disabled` is modified. The SSID, security, and channel settings survive any number of monitor mode cycles.
+
+### Recovery Path
+
+If `pwn4cd` crashes without restoring the radio, the operator can recover with a single command over SSH:
+
+```sh
+/etc/init.d/pwn4cd stop && wifi up
+```
+
+This works because the UCI profile is intact. No serial console required.
+
