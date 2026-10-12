@@ -74,4 +74,8 @@ uci commit wireless
 # them (no rc.d symlink). Without this line pwn4c-radio would never run.
 [ -x /etc/init.d/pwn4c-radio ] && /etc/init.d/pwn4c-radio enable
 
+# Enable the implant daemon if baked into the image (CI release images
+# include it; dev images may not — guarded so first boot never fails here).
+[ -x /usr/sbin/pwn4cd ] && /etc/init.d/pwn4cd enable
+
 exit 0

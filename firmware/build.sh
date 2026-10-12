@@ -59,6 +59,23 @@ cd "$IB_DIR"
 # NOTE: intermediates stay in WORK_DIR; OUT_DIR receives only the final
 # image + checksums (keeps artifacts and releases clean).
 IB_BIN_DIR="$WORK_DIR/imagebuilder-bin"
+
+# Optional: bake the pwn4cd implant daemon into the image.
+# CI sets PWN4CD_BIN to a cross-compiled mipsel static binary; the init
+# script comes from the repo. Images built without it are plain OpenWrt
+# (dev variant) — 99-pwn4c enables the service only if the binary exists.
+if [ -n "${PWN4CD_BIN:-}" ]; then
+    if [ ! -f "$PWN4CD_BIN" ]; then
+        echo "[ERROR] PWN4CD_BIN not found: $PWN4CD_BIN" >&2
+        exit 1
+    fi
+    echo "[*] Baking pwn4cd daemon into image files..."
+    mkdir -p "$FW_DIR/files/usr/sbin"
+    cp "$PWN4CD_BIN" "$FW_DIR/files/usr/sbin/pwn4cd"
+    chmod +x "$FW_DIR/files/usr/sbin/pwn4cd"
+    cp "$FW_DIR/../daemon/etc/init.d/pwn4cd" "$FW_DIR/files/etc/init.d/pwn4cd"
+fi
+
 make image PROFILE="$PROFILE" PACKAGES="$PACKAGES" FILES="$FW_DIR/files/" \
     EXTRA_IMAGE_NAME="pwn4c" BIN_DIR="$IB_BIN_DIR"
 

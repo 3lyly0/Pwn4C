@@ -1,28 +1,62 @@
-name: Firmware
+name: Drone Firmware
 
-# Rebuilds the OpenWrt image whenever firmware sources change.
-# Result is kept as a downloadable Artifact (see the Release workflow
-# for tagged releases).
 on:
   push:
     branches: [main]
-    paths: ['firmware/**', '.github/workflows/firmware.yml']
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/firmware.yml'
+      - '.github/actions/setup-sdk/**'
   pull_request:
-    paths: ['firmware/**', '.github/workflows/firmware.yml']
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/firmware.yml'
+      - '.github/actions/setup-sdk/**'
+  workflow_call:
+    # Allows daemon or release workflow to trigger firmware build
+    inputs:
+      daemon-artifact-name:
+        description: 'Name of pre-built daemon artifact to use (optional)'
+        type: string
+        required: false
+        default: ''
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
-  build:
-    name: Build image
+  lint-firmware:
+    name: Lint & Syntax Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ImageBuilder dependencies
+      - name: Check build.sh syntax
+        run: sh -n firmware/build.sh
+
+  build-image:
+    name: Build OpenWrt Image
+    needs: lint-firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential curl file gawk gettext git libncurses-dev libssl-dev \
-            python3 rsync unzip wget zlib1g-dev ca-certificates
+            python3 rsync unzip wget zlib1g-dev ca-certificates squashfs-tools
 
       - name: Cache ImageBuilder tree
         uses: actions/cache@v4
@@ -30,14 +64,48 @@ jobs:
           path: ~/ib-work
           key: imagebuilder-23.05.5-ramips-mt76x8
 
-      - name: Build
+      # If daemon artifact was passed via workflow_call, download it.
+      - name: Download Daemon Artifact (if provided)
+        if: ${{ inputs.daemon-artifact-name != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.daemon-artifact-name }}
+          path: daemon/
+
+      # If no pre-built daemon provided, cross-compile it now
+      - name: Setup SDK (if building daemon)
+        if: ${{ inputs.daemon-artifact-name == '' }}
+        id: sdk
+        uses: ./.github/actions/setup-sdk
+
+      - name: Cross-compile daemon (if needed)
+        if: ${{ inputs.daemon-artifact-name == '' }}
+        run: make -C daemon cross SDK_DIR="${{ steps.sdk.outputs.sdk-dir }}"
+
+      - name: Verify daemon binary
+        run: |
+          file daemon/pwn4cd-mips | grep -q MIPS
+          echo "Daemon binary verified."
+
+      - name: Build Firmware
         run: |
           mkdir -p ~/ib-work dist
-          WORK_DIR="$HOME/ib-work" OUT_DIR="$GITHUB_WORKSPACE/dist" sh firmware/build.sh
+          WORK_DIR="$HOME/ib-work" OUT_DIR="$GITHUB_WORKSPACE/dist" \
+            PWN4CD_BIN="$GITHUB_WORKSPACE/daemon/pwn4cd-mips" sh firmware/build.sh
 
-      - name: Upload image artifact
+      - name: Assert daemon baked into image
+        run: |
+          SQ=$(ls ~/ib-work/openwrt-imagebuilder-*/build_dir/target-*/linux-*/root.squashfs | head -n 1)
+          rm -rf /tmp/rootfs && mkdir -p /tmp/rootfs
+          unsquashfs -d /tmp/rootfs "$SQ" usr/sbin/pwn4cd etc/init.d/pwn4cd
+          test -x /tmp/rootfs/usr/sbin/pwn4cd
+          test -f /tmp/rootfs/etc/init.d/pwn4cd
+          file /tmp/rootfs/usr/sbin/pwn4cd | grep -q MIPS
+          echo "Daemon successfully verified inside root.squashfs!"
+
+      - name: Upload Firmware Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pwn4c-firmware
+          name: pwn4c-firmware-sysupgrade
           path: dist/
-          retention-days: 30
+          retention-days: 14

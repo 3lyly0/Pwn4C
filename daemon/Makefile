@@ -28,9 +28,13 @@ OBJS := $(SRCS:.c=.o)
 # -Wall -Wextra -Werror: zero-warning policy
 # -std=c99:     C99 strictly
 # No -mfpu, no -mhard-float (MT7628N has no FPU)
+#
+# VERSION: embedded as DAEMON_VERSION (default: git describe; CI passes tag).
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMON_CFLAGS := -std=c99 -Wall -Wextra -Werror -Os \
                  -ffunction-sections -fdata-sections \
-                 -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L
+                 -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L \
+                 -DDAEMON_VERSION=\"$(VERSION)\"
 
 COMMON_LDFLAGS := -Wl,--gc-sections
 
