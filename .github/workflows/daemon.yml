@@ -1,0 +1,31 @@
+name: Daemon
+
+# Validates the pwn4cd C daemon on every change: native build with
+# zero-warning policy, unit tests, and the mock end-to-end transcript.
+# (Cross-compile to mipsel happens at release time; the SDK download is
+# too heavy for per-push CI. See release.yml.)
+on:
+  push:
+    branches: [main]
+    paths: ['daemon/**', '.github/workflows/daemon.yml']
+  pull_request:
+    paths: ['daemon/**', '.github/workflows/daemon.yml']
+
+jobs:
+  build-test:
+    name: Build, unit tests, mock transcript
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: daemon
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (native, -Werror)
+        run: make clean && make
+
+      - name: Unit tests
+        run: make test
+
+      - name: Mock transcript
+        run: bash tests/mock_transcript.sh
