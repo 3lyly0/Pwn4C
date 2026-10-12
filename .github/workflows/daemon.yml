@@ -1,19 +1,30 @@
-name: Daemon
+name: Implant Daemon
 
-# Validates the pwn4cd C daemon on every change: native build with
-# zero-warning policy, unit tests, and the mock end-to-end transcript.
-# (Cross-compile to mipsel happens at release time; the SDK download is
-# too heavy for per-push CI. See release.yml.)
 on:
   push:
     branches: [main]
-    paths: ['daemon/**', '.github/workflows/daemon.yml']
+    paths:
+      - 'daemon/**'
+      - '.github/workflows/daemon.yml'
+      - '.github/actions/setup-sdk/**'
   pull_request:
-    paths: ['daemon/**', '.github/workflows/daemon.yml']
+    paths:
+      - 'daemon/**'
+      - '.github/workflows/daemon.yml'
+      - '.github/actions/setup-sdk/**'
+  workflow_call:
+    # Allows release or other workflows to trigger daemon build
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  build-test:
-    name: Build, unit tests, mock transcript
+  test-native:
+    name: Native Verification (-Werror & Tests)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -24,8 +35,47 @@ jobs:
       - name: Build (native, -Werror)
         run: make clean && make
 
-      - name: Unit tests
+      - name: Unit tests (67 assertions)
         run: make test
 
       - name: Mock transcript
         run: bash tests/mock_transcript.sh
+
+  cross-compile:
+    name: Cross-compile (mipsel static)
+    needs: test-native
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup OpenWrt SDK
+        id: sdk
+        uses: ./.github/actions/setup-sdk
+
+      - name: Cross-compile daemon
+        run: make -C daemon cross SDK_DIR="${{ steps.sdk.outputs.sdk-dir }}"
+
+      - name: Verify MIPS architecture & static link
+        run: |
+          file daemon/pwn4cd-mips | grep -q MIPS
+          file daemon/pwn4cd-mips | grep -q "statically linked"
+          ls -lh daemon/pwn4cd-mips
+
+      - name: Upload Daemon Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pwn4cd-mips
+          path: daemon/pwn4cd-mips
+          retention-days: 14
+
+  # When pushed directly (not called from another workflow), trigger firmware rebuild
+  # to bake the newly compiled daemon into the drone image.
+  trigger-firmware-bake:
+    name: Trigger Firmware Rebuild
+    if: ${{ github.event_name != 'workflow_call' }}
+    needs: cross-compile
+    uses: ./.github/workflows/firmware.yml
+    with:
+      daemon-artifact-name: pwn4cd-mips

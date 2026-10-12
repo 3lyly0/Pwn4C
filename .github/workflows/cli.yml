@@ -1,0 +1,91 @@
+name: CLI Tool
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cmd/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/cli.yml'
+  pull_request:
+    paths:
+      - 'cmd/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/cli.yml'
+  workflow_call:
+    # Allows release or other workflows to trigger CLI build directly
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint-test:
+    name: Code Quality & Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check gofmt
+        run: |
+          DIFF=$(gofmt -l .)
+          if [ -n "$DIFF" ]; then
+            echo "[ERROR] Unformatted Go files found:"
+            echo "$DIFF"
+            exit 1
+          fi
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Run Tests
+        run: go test -v ./...
+
+  build-matrix:
+    name: Build CLI (${{ matrix.os }})
+    needs: lint-test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  goos: linux,   goarch: amd64, bin: pwn4c }
+          - { os: windows-latest, goos: windows, goarch: amd64, bin: pwn4c.exe }
+          - { os: macos-latest,   goos: darwin,  goarch: amd64, bin: pwn4c }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build Binary
+        run: |
+          mkdir -p dist
+          go build -ldflags="-s -w" -o "dist/${{ matrix.bin }}" ./cmd/pwn4c
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pwn4c-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/${{ matrix.bin }}
+          retention-days: 14

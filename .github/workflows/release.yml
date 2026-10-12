@@ -1,8 +1,5 @@
 name: Release
 
-# Cut a release by tagging:  git tag v0.1.0 && git push origin v0.1.0
-# Attaches the cross-compiled CLI binaries AND the OpenWrt image
-# (plus checksums) to a single GitHub Release.
 on:
   push:
     tags: ['v*']
@@ -10,113 +7,92 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  tool:
-    name: Build CLI (${{ matrix.goos }}/${{ matrix.goarch }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {goos: windows, goarch: amd64, ext: .exe}
-          - {goos: linux, goarch: amd64, ext: ''}
-          - {goos: linux, goarch: arm64, ext: ''}
-          - {goos: darwin, goarch: amd64, ext: ''}
-          - {goos: darwin, goarch: arm64, ext: ''}
-    steps:
-      - uses: actions/checkout@v4
+  # 1. Build CLI tool for all supported platforms
+  build-cli:
+    name: Build CLI Binaries
+    uses: ./.github/workflows/cli.yml
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
+  # 2. Build daemon (MIPS static binary)
+  build-daemon:
+    name: Build Daemon Binary
+    uses: ./.github/workflows/daemon.yml
 
-      - name: Build
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
-        run: |
-          mkdir -p dist
-          go build -ldflags="-s -w" -o "dist/pwn4c-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./cmd/pwn4c
+  # 3. Build firmware image
+  build-firmware:
+    name: Build Firmware Image
+    uses: ./.github/workflows/firmware.yml
 
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist-tool-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/
-          retention-days: 30
-
-  firmware:
-    name: Build image
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install ImageBuilder dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential curl file gawk gettext git libncurses-dev libssl-dev \
-            python3 rsync unzip wget zlib1g-dev ca-certificates
-
-      - name: Cache ImageBuilder tree
-        uses: actions/cache@v4
-        with:
-          path: ~/ib-work
-          key: imagebuilder-23.05.5-ramips-mt76x8
-
-      - name: Build
-        run: |
-          mkdir -p ~/ib-work dist-firmware
-          WORK_DIR="$HOME/ib-work" OUT_DIR="$GITHUB_WORKSPACE/dist-firmware" sh firmware/build.sh
-
-      - name: Upload image artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist-firmware
-          path: dist-firmware/
-          retention-days: 30
-
+  # 4. Collect all 3 components and publish GitHub Release
   publish:
-    name: Publish GitHub Release
+    name: Publish Release
     runs-on: ubuntu-latest
-    needs: [tool, firmware]
+    needs: [build-cli, build-daemon, build-firmware]
     steps:
-      - name: Collect artifacts
+      - uses: actions/checkout@v4
+
+      - name: Create release directory
+        run: mkdir -p release-dist
+
+      # Download CLI binaries
+      - name: Download CLI artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: dist-*
-          path: dist
+          pattern: pwn4c-*
+          path: release-dist/
           merge-multiple: true
 
-      - name: Checksums
+      # Download daemon standalone binary
+      - name: Download Daemon artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pwn4cd-mips
+          path: release-dist/
+
+      # Download drone firmware image
+      - name: Download Firmware artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pwn4c-firmware-sysupgrade
+          path: release-dist/
+          merge-multiple: true
+
+      # Compute SHA256 checksums for all release assets
+      - name: Generate Checksums
         run: |
-          cd dist
+          cd release-dist
           rm -f checksums.sha256
-          find . -maxdepth 1 -type f -exec sha256sum {} + > checksums.sha256
+          sha256sum * > checksums.sha256
           cat checksums.sha256
 
-      - name: Beta notice
+      - name: Generate Release Notes
         run: |
+          cat << 'EOF' > RELEASE_NOTE.md
+          ### 📦 Pwn4C Modular Release
+
+          This release provides the 3 decoupled components of the Pwn4C ecosystem:
+
+          | Component | File | Description |
+          |---|---|---|
+          | **Operator CLI** | `pwn4c-linux-amd64`, `pwn4c-windows-amd64.exe`, `pwn4c-darwin-amd64` | Host orchestrator & control tool |
+          | **Implant Daemon** | `pwn4cd-mips` | Standalone MIPS static binary (for OTA/SSH drone updates) |
+          | **Drone Firmware** | `pwn4c-firmware-mi4c-sysupgrade.bin` | Full OpenWrt sysupgrade image with daemon pre-baked |
+          EOF
+
           if [[ "${{ github.ref_name }}" == *beta* ]]; then
-            printf '%s\n' \
-              '> [!WARNING]' \
-              '> **Beta / minimal build — NOT working yet.**' \
-              '>' \
-              '> This is an early minimal snapshot: the `infect` flow (root shell) works,' \
-              '> but `discover` / `monitor` / `status` are stubs, the `pwn4cd` drone' \
-              '> daemon is not written yet, and auto-flash is not implemented.' \
-              '> For evaluation only — wait for a stable release for real use.' > NOTE.md
-          else
-            touch NOTE.md
+            echo "" >> RELEASE_NOTE.md
+            echo "> [!WARNING]" >> RELEASE_NOTE.md
+            echo "> **Beta Build** — for testing and evaluation purposes." >> RELEASE_NOTE.md
           fi
 
-      - name: Publish release
+      - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
-          body_path: NOTE.md
+          files: release-dist/*
+          body_path: RELEASE_NOTE.md
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, 'beta') }}
