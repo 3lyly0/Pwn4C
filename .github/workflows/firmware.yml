@@ -5,15 +5,17 @@ on:
     branches: [main]
     paths:
       - 'firmware/**'
+      - 'daemon/**'
       - '.github/workflows/firmware.yml'
       - '.github/actions/setup-sdk/**'
   pull_request:
     paths:
       - 'firmware/**'
+      - 'daemon/**'
       - '.github/workflows/firmware.yml'
       - '.github/actions/setup-sdk/**'
   workflow_call:
-    # Allows daemon or release workflow to trigger firmware build
+    # Allows release workflow to trigger firmware build
     inputs:
       daemon-artifact-name:
         description: 'Name of pre-built daemon artifact to use (optional)'

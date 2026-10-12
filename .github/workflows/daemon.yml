@@ -13,7 +13,7 @@ on:
       - '.github/workflows/daemon.yml'
       - '.github/actions/setup-sdk/**'
   workflow_call:
-    # Allows release or other workflows to trigger daemon build
+    # Allows release workflow to trigger daemon build
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -69,13 +69,3 @@ jobs:
           name: pwn4cd-mips
           path: daemon/pwn4cd-mips
           retention-days: 14
-
-  # When pushed directly (not called from another workflow), trigger firmware rebuild
-  # to bake the newly compiled daemon into the drone image.
-  trigger-firmware-bake:
-    name: Trigger Firmware Rebuild
-    if: ${{ github.event_name != 'workflow_call' }}
-    needs: cross-compile
-    uses: ./.github/workflows/firmware.yml
-    with:
-      daemon-artifact-name: pwn4cd-mips
