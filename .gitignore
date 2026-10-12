@@ -23,6 +23,12 @@ output/
 # Go
 /vendor/
 
+# C build artifacts (daemon)
+/daemon/*.o
+/daemon/pwn4cd
+/daemon/pwn4cd-mips
+/daemon/tests/run_tests
+
 # OS / editor junk
 .DS_Store
 Thumbs.db
