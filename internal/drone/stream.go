@@ -17,10 +17,10 @@ import (
 // u16 frame_len
 // u16 reserved
 const (
-	StreamHeaderLen = 16
-	PCAPMagicMicro  = 0xa1b2c3d4 // PCAP standard magic number
-	PCAPVersionMaj  = 2
-	PCAPVersionMin  = 4
+	StreamHeaderLen        = 16
+	PCAPMagicMicro         = 0xa1b2c3d4 // PCAP standard magic number
+	PCAPVersionMaj         = 2
+	PCAPVersionMin         = 4
 	LinkTypeIEEE80211Radio = 127 // DLT_IEEE802_11_RADIO (RadioTap header)
 )
 
@@ -42,9 +42,9 @@ func NewPCAPWriter(filepath string) (*PCAPWriter, error) {
 	binary.LittleEndian.PutUint32(hdr[0:4], PCAPMagicMicro)
 	binary.LittleEndian.PutUint16(hdr[4:6], PCAPVersionMaj)
 	binary.LittleEndian.PutUint16(hdr[6:8], PCAPVersionMin)
-	binary.LittleEndian.PutUint32(hdr[8:12], 0) // thiszone
-	binary.LittleEndian.PutUint32(hdr[12:16], 0) // sigfigs
-	binary.LittleEndian.PutUint32(hdr[16:20], 65535) // snaplen
+	binary.LittleEndian.PutUint32(hdr[8:12], 0)                       // thiszone
+	binary.LittleEndian.PutUint32(hdr[12:16], 0)                      // sigfigs
+	binary.LittleEndian.PutUint32(hdr[16:20], 65535)                  // snaplen
 	binary.LittleEndian.PutUint32(hdr[20:24], LinkTypeIEEE80211Radio) // network / DLT
 
 	if _, err := f.Write(hdr); err != nil {
