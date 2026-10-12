@@ -255,3 +255,72 @@ func (c *ControlClient) RestoreNormal() error {
 	}
 	return nil
 }
+
+// SendInjection transmits a raw 802.11 frame with radiotap header on the active monitor channel
+func (c *ControlClient) SendInjection(frameHex string, count int, intervalMs int) (int, int, error) {
+	params := map[string]interface{}{
+		"frame_hex":   frameHex,
+		"count":       count,
+		"interval_ms": intervalMs,
+	}
+	resp, err := c.SendCommand("SEND_INJECTION", params)
+	if err != nil {
+		return 0, 0, err
+	}
+	if strings.ToLower(resp.Status) != "ok" {
+		if resp.Error != nil {
+			return 0, 0, fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+		}
+		return 0, 0, fmt.Errorf("failed to inject frame")
+	}
+
+	var data struct {
+		FramesSent   int `json:"frames_sent"`
+		FramesFailed int `json:"frames_failed"`
+	}
+	if err := json.Unmarshal(resp.Data, &data); err != nil {
+		return 0, 0, fmt.Errorf("unmarshal injection result: %w", err)
+	}
+	return data.FramesSent, data.FramesFailed, nil
+}
+
+// SetMAC updates the monitor MAC address (or randomizes if empty)
+func (c *ControlClient) SetMAC(mac string) (string, error) {
+	params := map[string]interface{}{}
+	if mac != "" {
+		params["mac"] = mac
+	}
+	resp, err := c.SendCommand("SET_MAC", params)
+	if err != nil {
+		return "", err
+	}
+	if strings.ToLower(resp.Status) != "ok" {
+		if resp.Error != nil {
+			return "", fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+		}
+		return "", fmt.Errorf("failed to set MAC")
+	}
+
+	var data struct {
+		MAC string `json:"mac"`
+	}
+	if err := json.Unmarshal(resp.Data, &data); err != nil {
+		return "", fmt.Errorf("unmarshal set_mac result: %w", err)
+	}
+	return data.MAC, nil
+}
+
+// Reboot triggers a hardware reboot of the drone
+func (c *ControlClient) Reboot() error {
+	resp, err := c.SendCommand("REBOOT", nil)
+	if err != nil {
+		return err
+	}
+	if strings.ToLower(resp.Status) != "ok" {
+		if resp.Error != nil {
+			return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+		}
+		return fmt.Errorf("failed to reboot drone")
+	}
+	return nil
+}
