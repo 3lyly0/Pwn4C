@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	statusTarget string
+	statusTarget  string
 	statusTimeout int
 )
 
