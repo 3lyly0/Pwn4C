@@ -19,7 +19,7 @@ Pwn4C converts a stock Xiaomi Mi Router 4C (MediaTek MT7628N, ~$15 USD) into a h
 - **Dual-Port Architecture**: Dedicated TCP control channel (port 4444) carries structured JSON telemetry and commands; high-throughput UDP channel (port 5555) streams raw 802.11 frames (RadioTap/PCAP) without TCP head-of-line blocking.
 - **Zero-Conf Autodiscovery (`pwn4c discover`)**: Drone implants broadcast periodic discovery beacons over UDP 4440; host CLI automatically detects all reachable drones on the subnet without manual IP configuration.
 - **Active 802.11 Frame Injection & Deauth (`pwn4c deauth`)**: Generates and transmits raw 802.11 management frames over the air to target specific clients or broadcast deauthentication against an access point.
-- **Spectrum Channel Hopping (`pwn4c hop`)**: Sweeps across 2.4 GHz channels (1–13) with configurable dwell times (e.g. 250ms) for broad-spectrum reconnaissance.
+- **Spectrum Channel Hopping (`pwn4c hop`)**: Sweeps across 2.4 GHz channels (1–13) with configurable dwell times (e.g. 250ms) for broad-spectrum reconnaissance. The host CLI sends repeated `SET_CHANNEL` JSON-RPC commands over the control plane.
 - **Hardware-Level RF Control (`pwn4c config`)**: Full control via `kmod-mt76` over transmission power (0–20 dBm), dynamic MAC address spoofing and randomization, and remote mode resets or reboots.
 - **Real-Time Telemetry (`pwn4c status`)**: Live hardware metrics including CPU temperature, available RAM, TX queue depth, and link state.
 
