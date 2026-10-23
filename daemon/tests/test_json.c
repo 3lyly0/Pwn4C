@@ -67,6 +67,22 @@ static void test_json_get_str(void)
     /* 6. Malformed (no closing quote) — must not crash, must return error */
     r = json_get_str("{\"key\":\"unclosed", "key", out, sizeof(out));
     CHECK("get_str unclosed", r < 0);
+
+    /* ── §1.4 edge-case: key name embedded inside a string value ────────── *
+     * {"cmd":"SET_CHANNEL","channel":6} — looking up "channel" must NOT     *
+     * match the substring inside the value "SET_CHANNEL".                   */
+    r = json_get_str("{\"cmd\":\"SET_CHANNEL\",\"channel\":\"6\"}",
+                     "channel", out, sizeof(out));
+    CHECK("get_str no value-substring match", r == 0 && strcmp(out, "6") == 0);
+
+    /* §1.4: key name is a prefix of another key — must not cross-match */
+    r = json_get_str("{\"ch\":\"A\",\"channel\":\"B\"}", "ch", out, sizeof(out));
+    CHECK("get_str prefix key no spill", r == 0 && strcmp(out, "A") == 0);
+
+    /* §1.4: value contains literal "\"cmd\"" substring — must not confuse */
+    r = json_get_str("{\"data\":\"has \\\"cmd\\\" in value\",\"cmd\":\"REAL\"}",
+                     "cmd", out, sizeof(out));
+    CHECK("get_str escaped-quote in value", r == 0 && strcmp(out, "REAL") == 0);
 }
 
 static void test_json_get_int(void)
@@ -101,6 +117,16 @@ static void test_json_get_int(void)
     /* 7. Large number */
     r = json_get_int("{\"bytes\":65536}", "bytes", &v);
     CHECK("get_int large", r == 0 && v == 65536);
+
+    /* ── §1.4 edge-case: integer key name substring inside string value ─── *
+     * {"cmd":"SET_CHANNEL","channel":11} — lookup "channel" must return 11, *
+     * not accidentally match the substring in the value "SET_CHANNEL".      */
+    r = json_get_int("{\"cmd\":\"SET_CHANNEL\",\"channel\":11}", "channel", &v);
+    CHECK("get_int no value-substring match", r == 0 && v == 11);
+
+    /* §1.4: key appears as value in a neighbour field */
+    r = json_get_int("{\"info\":\"channel is here\",\"channel\":3}", "channel", &v);
+    CHECK("get_int key-in-string-value", r == 0 && v == 3);
 }
 
 static void test_json_field_exists(void)

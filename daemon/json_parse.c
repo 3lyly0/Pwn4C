@@ -22,38 +22,85 @@
 /*
  * Find the value text starting after "key": in json.
  * Returns pointer into json just past the colon+whitespace, or NULL.
+ *
+ * Fix §1.4: advance through the JSON token by token so that string *values*
+ * containing the target key name (e.g. "cmd":"SET_CHANNEL") can never cause
+ * a false match on a subsequent lookup for "channel".  We skip over quoted
+ * strings (both keys and values) to stay structurally aware.
  */
 static const char *find_key(const char *json, const char *key)
 {
-    size_t klen;
+    size_t      klen;
     const char *p;
-    char needle[128];
+    char        needle[130];  /* "key"\0 */
 
     if (!json || !key) { return NULL; }
     klen = strlen(key);
-    if (klen + 4 >= sizeof(needle)) { return NULL; }  /* "KEY": */
+    if (klen + 3 >= sizeof(needle)) { return NULL; }  /* safety */
 
-    /* Build: "key" */
+    /* Build the quoted key pattern: "key" */
     needle[0] = '"';
     memcpy(needle + 1, key, klen);
     needle[1 + klen] = '"';
     needle[2 + klen] = '\0';
 
     p = json;
-    while ((p = strstr(p, needle)) != NULL) {
-        /* verify it's a proper JSON key (preceded by { , or whitespace) */
-        const char *after = p + 1 + klen + 1;  /* skip "key" */
-        /* skip whitespace */
-        while (*after == ' ' || *after == '\t' || *after == '\n'
-               || *after == '\r') {
-            after++;
+    while (*p != '\0') {
+        /* Skip whitespace and structural characters */
+        if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'
+            || *p == '{' || *p == '}' || *p == '[' || *p == ']'
+            || *p == ',' || *p == ':') {
+            p++;
+            continue;
         }
-        if (*after == ':') {
-            after++;
-            while (*after == ' ' || *after == '\t') { after++; }
-            return after;
+
+        if (*p == '"') {
+            /* Scan a quoted token (key or string value) */
+            const char *tok_start = p;
+            p++;  /* skip opening quote */
+            while (*p != '\0') {
+                if (*p == '\\') {
+                    p++;             /* skip escape prefix */
+                    if (*p) { p++; } /* skip escaped char  */
+                    continue;
+                }
+                if (*p == '"') {
+                    p++;  /* skip closing quote */
+                    break;
+                }
+                p++;
+            }
+            /* Now p points just past the closing quote.
+             * Skip optional whitespace and check for ':' to distinguish
+             * a key from a string value. */
+            const char *after = p;
+            while (*after == ' ' || *after == '\t' || *after == '\n'
+                   || *after == '\r') {
+                after++;
+            }
+            if (*after == ':') {
+                /* This token is a key.  Check if it matches our target. */
+                size_t tok_len = (size_t)(p - tok_start);
+                size_t needle_len = klen + 2;  /* "key" */
+                if (tok_len == needle_len
+                    && memcmp(tok_start, needle, needle_len) == 0) {
+                    /* Match!  Skip past the colon and optional whitespace. */
+                    after++;  /* skip ':' */
+                    while (*after == ' ' || *after == '\t') { after++; }
+                    return after;
+                }
+                /* Not our key — skip past ':' and continue with the value */
+                p = after + 1;  /* advance past ':' */
+            }
+            /* else: string value — p is already past it; continue */
+            continue;
         }
-        p++;  /* advance past false match */
+
+        /* Non-string token (number, boolean, null) — skip it */
+        while (*p != '\0' && *p != ',' && *p != '}' && *p != ']'
+               && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') {
+            p++;
+        }
     }
     return NULL;
 }
