@@ -4,6 +4,10 @@
 cmd/pwn4c/pwn4c
 cmd/pwn4c/pwn4c.exe
 
+# Local engineering notes / audit docs (not part of the public repo)
+/pwn4c_architecture_audit_report.md
+/pwn4c_project_todo_roadmap.md
+
 # Stock / generated firmware images (large, downloadable from Xiaomi)
 firmware/*.bin
 
