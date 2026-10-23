@@ -37,6 +37,23 @@ chmod +x "$FW_DIR/files/etc/init.d/"* 2>/dev/null || true
 # executable documents intent and is harmless.
 chmod +x "$FW_DIR/files/etc/uci-defaults/"* 2>/dev/null || true
 
+# ── 1.1: Auto-stage pwn4cd binary + init script into firmware/files/ ───────
+# If PWN4CD_BIN is not explicitly set, attempt to cross-compile the daemon
+# automatically so a standalone `./build.sh` always produces a full image.
+if [ -z "${PWN4CD_BIN:-}" ]; then
+    DAEMON_DIR="$(cd "$FW_DIR/../daemon" 2>/dev/null && pwd)" || true
+    if [ -d "$DAEMON_DIR" ] && [ -f "$DAEMON_DIR/Makefile" ]; then
+        echo "[*] PWN4CD_BIN not set — attempting auto cross-compile (make -C daemon cross)..."
+        if make -C "$DAEMON_DIR" cross; then
+            PWN4CD_BIN="$DAEMON_DIR/pwn4cd-mips"
+            echo "[*] Cross-compile succeeded: $PWN4CD_BIN"
+        else
+            echo "[!] Cross-compile failed (missing SDK?). Continuing without daemon binary." \
+                 "Set PWN4CD_BIN= to suppress this attempt." >&2
+        fi
+    fi
+fi
+
 mkdir -p "$WORK_DIR" "$OUT_DIR"
 cd "$WORK_DIR"
 
@@ -64,6 +81,7 @@ IB_BIN_DIR="$WORK_DIR/imagebuilder-bin"
 # CI sets PWN4CD_BIN to a cross-compiled mipsel static binary; the init
 # script comes from the repo. Images built without it are plain OpenWrt
 # (dev variant) — 99-pwn4c enables the service only if the binary exists.
+# PWN4CD_BIN may also be auto-resolved above from the daemon/ cross-compile.
 if [ -n "${PWN4CD_BIN:-}" ]; then
     if [ ! -f "$PWN4CD_BIN" ]; then
         echo "[ERROR] PWN4CD_BIN not found: $PWN4CD_BIN" >&2
@@ -72,8 +90,13 @@ if [ -n "${PWN4CD_BIN:-}" ]; then
     echo "[*] Baking pwn4cd daemon into image files..."
     mkdir -p "$FW_DIR/files/usr/sbin"
     cp "$PWN4CD_BIN" "$FW_DIR/files/usr/sbin/pwn4cd"
-    chmod +x "$FW_DIR/files/usr/sbin/pwn4cd"
+    chmod 0755 "$FW_DIR/files/usr/sbin/pwn4cd"
+    # Stage the init script from daemon/etc/init.d/ into firmware/files/
+    # so freshly-flashed routers automatically launch pwn4cd on boot.
+    mkdir -p "$FW_DIR/files/etc/init.d"
     cp "$FW_DIR/../daemon/etc/init.d/pwn4cd" "$FW_DIR/files/etc/init.d/pwn4cd"
+    chmod 0755 "$FW_DIR/files/etc/init.d/pwn4cd"
+    echo "[*] Staged: usr/sbin/pwn4cd + etc/init.d/pwn4cd"
 fi
 
 make image PROFILE="$PROFILE" PACKAGES="$PACKAGES" FILES="$FW_DIR/files/" \
