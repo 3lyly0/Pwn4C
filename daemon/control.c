@@ -24,6 +24,7 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <linux/if_packet.h>
 #include <linux/if_ether.h>
@@ -654,11 +655,11 @@ int ctrl_accept(daemon_t *d)
     int                cfd;
     int                flags;
     char               peerstr[INET_ADDRSTRLEN];
-
-    if (d->ctrl_client_fd >= 0) {
-        /* Already have a client; refuse silently by not accepting */
-        return 0;
-    }
+    /* TCP keepalive tuning constants (per roadmap §1.2) */
+    static const int   ka_on       = 1;
+    static const int   ka_idle     = 10;   /* seconds before first probe  */
+    static const int   ka_intvl    = 3;    /* seconds between probes      */
+    static const int   ka_cnt      = 3;    /* probes before declaring dead */
 
     peerlen = sizeof(peer);
     do {
@@ -671,11 +672,28 @@ int ctrl_accept(daemon_t *d)
         return -1;
     }
 
+    /* ── 1.2: Replace a stale dead-peer connection instead of refusing ─── *
+     * If a previous client's TCP socket is still open (e.g. after SIGKILL  *
+     * or a network drop without FIN), the keepalive probes above will have  *
+     * eventually closed it.  If the slot is still occupied, close it now    *
+     * so the new connection can proceed, stopping any active monitor first. */
+    if (d->ctrl_client_fd >= 0) {
+        util_log("ctrl", "new connection displacing stale client (fd=%d)",
+                 d->ctrl_client_fd);
+        ctrl_close_client(d);
+    }
+
     /* Set non-blocking on client fd */
     flags = fcntl(cfd, F_GETFL, 0);
     if (flags >= 0) {
         (void)fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
     }
+
+    /* ── 1.2: Enable TCP keepalive to detect silent peer disappearance ─── */
+    (void)setsockopt(cfd, SOL_SOCKET,  SO_KEEPALIVE,   &ka_on,    sizeof(ka_on));
+    (void)setsockopt(cfd, IPPROTO_TCP, TCP_KEEPIDLE,   &ka_idle,  sizeof(ka_idle));
+    (void)setsockopt(cfd, IPPROTO_TCP, TCP_KEEPINTVL,  &ka_intvl, sizeof(ka_intvl));
+    (void)setsockopt(cfd, IPPROTO_TCP, TCP_KEEPCNT,    &ka_cnt,   sizeof(ka_cnt));
 
     d->ctrl_client_fd = cfd;
     d->host_ip        = peer.sin_addr.s_addr;  /* network byte order */
