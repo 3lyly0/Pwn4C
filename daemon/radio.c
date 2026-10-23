@@ -234,6 +234,11 @@ int radio_set_channel(daemon_t *d, int channel)
 /*
  * radio_set_txpower — Set TX power in dBm using iw.
  * iw expects mBm (milli-dBm = dBm * 100).
+ *
+ * Fix §1.3: when in RADIO_MONITOR mode wlan0 may be down/absent.
+ * Apply the power setting to phy0 directly so mt7603e honours it
+ * regardless of which virtual interface is currently up.
+ * Fall back to the wlan_iface dev-level command for RADIO_NORMAL.
  */
 int radio_set_txpower(daemon_t *d, int dbm)
 {
@@ -244,7 +249,16 @@ int radio_set_txpower(daemon_t *d, int dbm)
     if (dbm < 1 || dbm > DAEMON_MAX_TXPWR) { return -1; }
 
     mbm = dbm * 100;  /* integer, no float */
-    r   = iw_run("iw dev %s set txpower fixed %d", d->wlan_iface, mbm);
+
+    if (d->radio_mode == RADIO_MONITOR) {
+        /* Target the underlying PHY so the setting applies to mon0 / wlan0  *
+         * whichever virtual interface is active.  phy0 is the only physical  *
+         * radio on the MT7628N so this is always safe.                       */
+        r = iw_run("iw phy phy0 set txpower fixed %d", mbm);
+    } else {
+        r = iw_run("iw dev %s set txpower fixed %d", d->wlan_iface, mbm);
+    }
+
     if (r != 0) {
         util_log("radio", "txpower %d dBm failed: %d", dbm, r);
         return -1;
