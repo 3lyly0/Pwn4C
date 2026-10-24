@@ -146,11 +146,12 @@ static void test_mac_parse(void)
     CHECK("mac dash sep fail", r < 6);
 }
 
-void run_hex_tests(void)
+int run_hex_tests(void)
 {
     printf("=== Hex Decode + MAC Parse Tests ===\n");
     test_hex_decode();
     test_mac_parse();
+    return g_failed;
 }
 
 #ifndef TEST_COMBINED

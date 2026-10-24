@@ -8,35 +8,37 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* Declared in each test file, compiled together */
-void run_json_tests(void);
-void run_stream_tests(void);
-void run_hex_tests(void);
+/* Declared in each test file, compiled together.
+ * Each returns the number of failed assertions in its suite. */
+int run_json_tests(void);
+int run_stream_tests(void);
+int run_hex_tests(void);
 int run_bpf_tests(void);
 
 int main(void)
 {
+    int failures = 0;
+
     printf("==============================================\n");
     printf("  pwn4cd daemon unit tests\n");
     printf("==============================================\n\n");
 
-    run_json_tests();
+    failures += run_json_tests();
     printf("\n");
-    run_stream_tests();
+    failures += run_stream_tests();
     printf("\n");
-    run_hex_tests();
-    printf("
-");
-    run_bpf_tests();
+    failures += run_hex_tests();
+    printf("\n");
+    failures += run_bpf_tests();
 
     printf("\n==============================================\n");
-    printf("  All test suites completed.\n");
+    if (failures > 0) {
+        printf("  FAILED: %d assertion(s)\n", failures);
+    } else {
+        printf("  All test suites completed.\n");
+    }
     printf("==============================================\n");
 
-    /* Individual suites report their own pass/fail counts.
-     * For CI we rely on each suite returning a non-zero exit if any fail.
-     * Since we can't collect that here easily without linking private counters,
-     * we simply return 0 — CI should check suite outputs for "FAIL:" strings.
-     * The Makefile `test` target pipes through grep in the CI workflow. */
-    return 0;
+    /* Propagate failures to the CI shell so regressions fail the build. */
+    return failures > 0 ? 1 : 0;
 }

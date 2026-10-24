@@ -221,7 +221,7 @@ static void test_48bit_timestamp(void)
     CHECK("ts48 zero hi", hdr[14]==0 && hdr[15]==0);
 }
 
-void run_stream_tests(void)
+int run_stream_tests(void)
 {
     printf("=== Stream Header Tests ===\n");
     test_put_u32_be();
@@ -230,6 +230,7 @@ void run_stream_tests(void)
     test_frag_count();
     test_seq_wrap();
     test_48bit_timestamp();
+    return g_failed;
 }
 
 #ifndef TEST_COMBINED

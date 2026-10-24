@@ -219,7 +219,7 @@ static void test_json_get_int_array(void)
     CHECK("get_int_array not an array", r < 0);
 }
 
-void run_json_tests(void)
+int run_json_tests(void)
 {
     printf("=== JSON Parser Tests ===\n");
     test_json_get_str();
@@ -227,6 +227,7 @@ void run_json_tests(void)
     test_json_get_int_array();
     test_json_field_exists();
     test_real_commands();
+    return g_failed;
 }
 
 #ifndef TEST_COMBINED
