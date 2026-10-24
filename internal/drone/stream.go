@@ -134,13 +134,15 @@ func (r *FrameReceiver) readLoop(onFrame func(seq uint32, frame []byte)) {
 	buf := make([]byte, 4096)
 
 	const maxFragSets = 16
+	const maxFragCount = 64 // must fit in the uint64 received-mask
 	const fragTTL = 100 * time.Millisecond
 
 	type fragEntry struct {
-		data    []byte
-		count   uint16
-		got     uint16
-		expires time.Time
+		slots    [][]byte // indexed by fragIdx; nil = not yet received
+		received uint64   // bitmask of received fragment indices
+		count    uint16
+		frameLen uint16
+		expires  time.Time
 	}
 	frags := make(map[uint32]*fragEntry, maxFragSets)
 	var dropCount uint64
@@ -181,7 +183,7 @@ func (r *FrameReceiver) readLoop(onFrame func(seq uint32, frame []byte)) {
 
 		seq := binary.BigEndian.Uint32(buf[0:4])
 		tsLo32 := binary.BigEndian.Uint32(buf[4:8])
-		_ = binary.BigEndian.Uint16(buf[8:10]) // fragIdx (tracked via entry.got)
+		fragIdx := binary.BigEndian.Uint16(buf[8:10])
 		fragCount := binary.BigEndian.Uint16(buf[10:12])
 		frameLen := binary.BigEndian.Uint16(buf[12:14])
 		tsHi16 := binary.BigEndian.Uint16(buf[14:16])
@@ -194,7 +196,14 @@ func (r *FrameReceiver) readLoop(onFrame func(seq uint32, frame []byte)) {
 			fullFrame = make([]byte, len(payload))
 			copy(fullFrame, payload)
 		} else {
-			// Multi-fragment reassembly with bounded window
+			// Indexed multi-fragment reassembly. Datagrams may arrive out of
+			// order or be duplicated, so slot each fragment by fragIdx and
+			// emit the frame only once every index is present.
+			if fragCount == 0 || fragCount > maxFragCount || fragIdx >= fragCount {
+				dropCount++
+				continue
+			}
+
 			entry, exists := frags[seq]
 			if !exists {
 				// Evict oldest if at capacity
@@ -213,23 +222,57 @@ func (r *FrameReceiver) readLoop(onFrame func(seq uint32, frame []byte)) {
 					delete(frags, oldest)
 				}
 				entry = &fragEntry{
-					data:    make([]byte, 0, frameLen),
-					count:   fragCount,
-					expires: time.Now().Add(fragTTL),
+					slots:    make([][]byte, fragCount),
+					count:    fragCount,
+					frameLen: frameLen,
+					expires:  time.Now().Add(fragTTL),
 				}
 				frags[seq] = entry
 			}
-			// Append fragment payload
-			entry.data = append(entry.data, payload...)
-			entry.got++
-			entry.expires = time.Now().Add(fragTTL) // refresh TTL on activity
 
-			if entry.got >= entry.count || uint16(len(entry.data)) >= frameLen {
-				fullFrame = entry.data
+			if entry.count != fragCount || entry.frameLen != frameLen {
+				// Inconsistent header for the same sequence: discard the set.
 				delete(frags, seq)
-			} else {
+				dropCount++
 				continue
 			}
+
+			if entry.slots[fragIdx] == nil {
+				chunk := make([]byte, len(payload))
+				copy(chunk, payload)
+				entry.slots[fragIdx] = chunk
+				entry.received |= uint64(1) << fragIdx
+			}
+			entry.expires = time.Now().Add(fragTTL) // refresh TTL on activity
+
+			var allReceived uint64
+			if entry.count >= 64 {
+				allReceived = ^uint64(0)
+			} else {
+				allReceived = (uint64(1) << entry.count) - 1
+			}
+			if entry.received != allReceived {
+				continue
+			}
+
+			total := 0
+			for _, s := range entry.slots {
+				total += len(s)
+			}
+			if frameLen > 0 && total < int(frameLen) {
+				// Every index arrived but the payload is short of frame_len.
+				delete(frags, seq)
+				dropCount++
+				continue
+			}
+			fullFrame = make([]byte, 0, total)
+			for _, s := range entry.slots {
+				fullFrame = append(fullFrame, s...)
+			}
+			if frameLen > 0 && len(fullFrame) > int(frameLen) {
+				fullFrame = fullFrame[:frameLen]
+			}
+			delete(frags, seq)
 		}
 
 		// §2.2: Reconstruct PCAP timestamp from 48-bit µs stream timestamp
