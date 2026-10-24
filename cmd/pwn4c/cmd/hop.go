@@ -19,6 +19,26 @@ var (
 	hopTarget   string
 )
 
+// parseChannelList parses a comma-separated list of 2.4 GHz channel numbers.
+func parseChannelList(list string) ([]int, error) {
+	var channels []int
+	for _, part := range strings.Split(list, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		ch, err := strconv.Atoi(part)
+		if err != nil || ch < 1 || ch > 13 {
+			return nil, fmt.Errorf("invalid channel '%s' (must be between 1 and 13)", part)
+		}
+		channels = append(channels, ch)
+	}
+	if len(channels) == 0 {
+		return nil, fmt.Errorf("no valid channels specified")
+	}
+	return channels, nil
+}
+
 var hopCmd = &cobra.Command{
 	Use:   "hop [target_drone_ip]",
 	Short: "Continuously hop across 2.4 GHz Wi-Fi channels",
@@ -42,19 +62,9 @@ var hopCmd = &cobra.Command{
 		}
 
 		// Parse channel list
-		var channels []int
-		for _, part := range strings.Split(hopChannels, ",") {
-			part = strings.TrimSpace(part)
-			ch, err := strconv.Atoi(part)
-			if err != nil || ch < 1 || ch > 13 {
-				fmt.Printf("[!] Invalid channel '%s' (must be between 1 and 13)\n", part)
-				os.Exit(1)
-			}
-			channels = append(channels, ch)
-		}
-
-		if len(channels) == 0 {
-			fmt.Println("[!] No valid channels specified.")
+		channels, err := parseChannelList(hopChannels)
+		if err != nil {
+			fmt.Printf("[!] %v\n", err)
 			os.Exit(1)
 		}
 

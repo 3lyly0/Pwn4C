@@ -17,6 +17,9 @@ var (
 	monitorTarget      string
 	monitorMgmtOnly    bool
 	monitorFilterBSSID string
+	monitorHop         bool
+	monitorHopChannels string
+	monitorHopDwell    int
 )
 
 var monitorCmd = &cobra.Command{
@@ -83,6 +86,28 @@ var monitorCmd = &cobra.Command{
 			}
 		}
 
+		// 4. Optionally start autonomous hopping on the same control session,
+		// so no second CLI process displaces this capture connection.
+		var hopList []int
+		if monitorHop {
+			channels, err := parseChannelList(monitorHopChannels)
+			if err != nil {
+				fmt.Printf("[!] %v\n", err)
+				_ = client.StopMonitor()
+				os.Exit(1)
+			}
+			hopList = channels
+			if monitorHopDwell < 50 {
+				monitorHopDwell = 50
+			}
+			fmt.Printf("[+] Starting autonomous channel hop across %v (dwell %dms)...\n",
+				hopList, monitorHopDwell)
+			if err := client.StartHop(hopList, monitorHopDwell); err != nil {
+				fmt.Printf("[!] Warning: failed to start channel hopping: %v\n", err)
+				hopList = nil
+			}
+		}
+
 		fmt.Println("[+] Monitor mode streaming active. Press Ctrl+C to stop.")
 
 		// Handle graceful termination
@@ -92,6 +117,9 @@ var monitorCmd = &cobra.Command{
 		<-sigCh
 		fmt.Println("\n[*] Stopping monitor session...")
 
+		if len(hopList) > 0 {
+			_ = client.StopHop()
+		}
 		_ = client.StopMonitor()
 		_ = receiver.Close()
 
@@ -105,5 +133,8 @@ func init() {
 	monitorCmd.Flags().StringVarP(&monitorTarget, "target", "t", "", "Target drone IP (defaults to auto-discovery)")
 	monitorCmd.Flags().BoolVar(&monitorMgmtOnly, "mgmt-only", false, "Kernel BPF filter: 802.11 management frames only")
 	monitorCmd.Flags().StringVar(&monitorFilterBSSID, "filter-bssid", "", "Kernel BPF filter: target BSSID MAC address")
+	monitorCmd.Flags().BoolVar(&monitorHop, "hop", false, "Enable autonomous drone-side channel hopping")
+	monitorCmd.Flags().StringVar(&monitorHopChannels, "channels", "1,6,11", "Comma-separated channels for --hop (e.g. 1,6,11)")
+	monitorCmd.Flags().IntVar(&monitorHopDwell, "dwell", 250, "Dwell time per channel in ms for --hop")
 	rootCmd.AddCommand(monitorCmd)
 }
