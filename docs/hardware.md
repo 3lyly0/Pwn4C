@@ -111,7 +111,7 @@ Total physical RAM: 64 MB (67,108,864 bytes). Typical runtime allocation:
 | tmpfs (`/tmp`) | ~2 MB baseline |
 | Filesystem caches | Remainder (~49 MB) |
 
-The primary constraint is flash storage, not RAM. `pwn4cd` uses a fixed 64 KB ring buffer for captured frames, keeping its memory footprint predictable.
+The primary constraint is flash storage, not RAM. `pwn4cd` uses a fixed 512 KB ring buffer for captured frames, keeping its memory footprint predictable.
 
 ---
 
@@ -132,7 +132,7 @@ The primary constraint is flash storage, not RAM. `pwn4cd` uses a fixed 64 KB ri
 
 ### Monitor Mode Behavior
 
-When `pwn4cd` places the radio in monitor mode via `iw dev ra0 set monitor none`:
+When `pwn4cd` places the radio in monitor mode via `iw dev wlan0 set monitor none`:
 
 1. The interface detaches from all BSS associations.
 2. The driver disables hardware frame filtering: all received 802.11 frames (management, control, data) are delivered to user-space.
@@ -150,7 +150,7 @@ The `mt76` driver is the mainline Linux driver for MediaTek MT76x0/MT76x2 radios
 - Back-to-back injection (e.g., deauthentication floods) can saturate the TX queue. The driver returns `ENOBUFS` when full. `pwn4cd` handles this by sleeping 1 ms and retrying up to 10 times before reporting failure.
 
 **Channel Switching:**
-- Channel changes via `iw dev ra0 set channel <N>` complete in ~5 ms on the MT7628N.
+- Channel changes via `iw dev wlan0 set channel <N>` complete in ~5 ms on the MT7628N.
 - During a switch, the RX path halts briefly. Expect a 5-15 ms gap in the capture stream. The Host should account for this when correlating timestamps.
 
 **Known Limitations:**

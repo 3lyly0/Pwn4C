@@ -15,13 +15,14 @@ Pwn4C converts a stock Xiaomi Mi Router 4C (MediaTek MT7628N, ~$15 USD) into a h
 
 ## Features
 
-- **Zero-Touch Deployment (`pwn4c infect`)**: Exploits stock firmware Web API authentication & command injection to push payloads and flash custom firmware silently over LAN with zero serial or TFTP intervention.
-- **Dual-Port Architecture**: Dedicated TCP control channel (port 4444) carries structured JSON telemetry and commands; high-throughput UDP channel (port 5555) streams raw 802.11 frames (RadioTap/PCAP) without TCP head-of-line blocking.
-- **Zero-Conf Autodiscovery (`pwn4c discover`)**: Drone implants broadcast periodic discovery beacons over UDP 4440; host CLI automatically detects all reachable drones on the subnet without manual IP configuration.
-- **Active 802.11 Frame Injection & Deauth (`pwn4c deauth`)**: Generates and transmits raw 802.11 management frames over the air to target specific clients or broadcast deauthentication against an access point.
-- **Spectrum Channel Hopping (`pwn4c hop`)**: Sweeps across 2.4 GHz channels (1–13) with configurable dwell times (e.g. 250ms) for broad-spectrum reconnaissance. The host CLI sends repeated `SET_CHANNEL` JSON-RPC commands over the control plane.
-- **Hardware-Level RF Control (`pwn4c config`)**: Full control via `kmod-mt76` over transmission power (0–20 dBm), dynamic MAC address spoofing and randomization, and remote mode resets or reboots.
-- **Real-Time Telemetry (`pwn4c status`)**: Live hardware metrics including CPU temperature, available RAM, TX queue depth, and link state.
+- **Zero-Touch Air-Gapped Deployment (`pwn4c infect`)**: Exploits stock firmware Web API authentication & command injection to enable root access and optionally flash custom OpenWrt firmware (`--flash`) over LAN with zero internet, serial, or TFTP intervention.
+- **Dual-Port Architecture & HMAC-SHA256 Security**: Dedicated TCP control channel (port 4444) with optional pre-shared key (`--psk`) challenge-response authentication carries structured JSON telemetry and commands; high-throughput UDP channel (port 5555) streams raw 802.11 frames (RadioTap/PCAP) with 48-bit monotonic timestamps and indexed fragment reassembly.
+- **Zero-Conf Autodiscovery (`pwn4c discover`)**: Drone implants respond to discovery beacons over UDP 4440; host CLI automatically detects all reachable drones on the subnet without manual IP configuration.
+- **Autonomous Daemon-Side Channel Hopping (`pwn4c hop` / `pwn4c monitor --hop`)**: Sweeps across 2.4 GHz channels (1–13) directly inside the C daemon's `select()` timer loop using native `nl80211` Generic Netlink (`<2ms` switch latency) with zero TCP polling overhead.
+- **Kernel Classic BPF Frame Filtering (`--mgmt-only`, `--filter-bssid`)**: Attaches classic BPF bytecode (`SO_ATTACH_FILTER`) to the `AF_PACKET` socket in kernel space, filtering Management frames or target BSSIDs across Addr1/Addr2/Addr3 (preserving Data and WPA/EAPOL handshakes).
+- **Live Wireshark Pipe Streaming (`pwn4c monitor -o -`)**: Streams standard `DLT_IEEE802_11_RADIO` PCAP records directly to `stdout` for real-time inspection in Wireshark (`pwn4c monitor -c 6 -o - | wireshark -k -i -`).
+- **Active 802.11 Frame Injection & Deauth (`pwn4c deauth`)**: Enqueues raw 802.11 management frames into a 64-slot non-blocking TX ring buffer with configurable inter-frame pacing (`--interval`).
+- **Hardware-Level RF Control & Self-Healing (`pwn4c config`, `pwn4c status`)**: Direct `nl80211` and POSIX `ioctl` control over transmission power (1–20 dBm), dynamic MAC spoofing/randomization, automatic interface recovery on `ENETDOWN`/`ENODEV`, and full drop telemetry (`rx_frames`, `tx_frames`, `ring_overruns`, `kernel_drops`, `iface_recoveries`).
 
 ---
 
@@ -29,12 +30,12 @@ Pwn4C converts a stock Xiaomi Mi Router 4C (MediaTek MT7628N, ~$15 USD) into a h
 
 | Command | Syntax / Example | Description |
 |---|---|---|
-| `infect` | `pwn4c infect 192.168.31.1` | Exploits stock Xiaomi firmware and enables root access |
+| `infect` | `pwn4c infect 192.168.31.1 [-f sysupgrade.bin]` | Exploits stock Xiaomi firmware (air-gapped) and optionally flashes Pwn4C OS |
 | `discover` | `pwn4c discover [-t 3]` | Scans subnet for active Pwn4C drone implants via UDP broadcast |
-| `status` | `pwn4c status [target_ip]` | Queries live telemetry, link health, and radio state over TCP |
-| `monitor` | `pwn4c monitor [target_ip] -c 6 -o capture.pcap` | Starts 802.11 monitor mode and streams live PCAP frames |
-| `hop` | `pwn4c hop [target_ip] -d 250 -c 1,6,11` | Continuously cycles Wi-Fi channels with configurable dwell time |
-| `deauth` | `pwn4c deauth [target_ip] -b <bssid> [-c <client>]` | Injects raw IEEE 802.11 deauthentication frames |
+| `status` | `pwn4c status [target_ip] [--psk secret]` | Queries live telemetry, drop counters, and radio state over TCP |
+| `monitor` | `pwn4c monitor [target_ip] -c 6 -o capture.pcap [--hop]` | Starts 802.11 monitor mode, optional BPF filter/hopper, and streams PCAP |
+| `hop` | `pwn4c hop [target_ip] -d 250 -c 1,6,11` | Starts autonomous drone-side channel hopping across specified channels |
+| `deauth` | `pwn4c deauth [target_ip] -b <bssid> [-c <client>]` | Injects raw IEEE 802.11 deauthentication frames via non-blocking TX queue |
 | `config` | `pwn4c config [target_ip] --power 20 --mac random` | Adjusts TX power, randomizes/spoofs MAC, or restores normal mode |
 
 ---
@@ -58,6 +59,8 @@ Connect your host PC to the router's LAN port:
 
 ```bash
 pwn4c infect 192.168.31.1
+# Or infect and automatically flash Pwn4C OpenWrt image:
+pwn4c infect 192.168.31.1 --flash firmware/output/pwn4c-firmware-mi4c-sysupgrade.bin
 ```
 
 ### 3. Discover Active Drone
@@ -68,22 +71,21 @@ Once the custom firmware is booted, discover the implant on the link:
 pwn4c discover
 ```
 
-### 4. Monitor & Capture Live Traffic
-
-Capture live 802.11 traffic on channel 6 and save directly to a Wireshark-compatible PCAP:
+### 4. Monitor, Filter & Pipe Live Traffic to Wireshark
 
 ```bash
-pwn4c monitor -c 6 -o capture.pcap
+# Save channel 6 capture to file with BSSID kernel BPF filter
+pwn4c monitor -c 6 --filter-bssid AA:BB:CC:DD:EE:FF -o capture.pcap
+
+# Sweep channels 1, 6, 11 autonomously and pipe live to Wireshark
+pwn4c monitor --hop --channels 1,6,11 --dwell 250 -o - | wireshark -k -i -
 ```
 
-### 5. RF Attacks & Spectrum Sweeping
+### 5. RF Attacks & Hardware Configuration
 
 ```bash
-# Sweep channels 1, 6, 11 with 250ms dwell time
-pwn4c hop -d 250 -c 1,6,11
-
-# Inject 20 deauth frames against target AP client
-pwn4c deauth -b AA:BB:CC:DD:EE:FF -c 11:22:33:44:55:66 -i 6 -n 20
+# Inject 20 deauth frames against target AP client with 10ms pacing
+pwn4c deauth -b AA:BB:CC:DD:EE:FF -c 11:22:33:44:55:66 -i 6 -n 20 --interval 10
 
 # Maximize TX power and randomize drone MAC
 pwn4c config --power 20 --mac random
@@ -107,11 +109,11 @@ pwn4c config --power 20 --mac random
 Pwn4C/
 ├── .github/workflows/  # Modular CI/CD pipelines (CLI, Daemon, Firmware, Release)
 ├── cmd/pwn4c/          # Host Controller (Go CLI): C2, autodiscovery, exploit deployer
-├── daemon/             # pwn4cd (C): embedded daemon for Drone (mips_24kc, musl, static)
+├── daemon/             # pwn4cd (C99): embedded daemon for Drone (mipsel_24kc, musl, static)
 ├── firmware/           # OpenWrt ImageBuilder scripts, Dockerized build, rootfs config
 ├── internal/
 │   ├── drone/          # C2 TCP client, UDP PCAP receiver, 802.11 frame builders
-│   └── exploit/        # CVE-2019-18370/18371 automated exploit engine
+│   └── exploit/        # CVE-2019-18370/18371 air-gapped exploit & flash engine
 ├── docs/               # Architecture, API wire specs, and hardware documentation
 └── LICENSE             # Dual-license specification
 ```
