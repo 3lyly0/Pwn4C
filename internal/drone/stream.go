@@ -132,8 +132,18 @@ func StartStreamReceiver(port int, pcapDest string, onFrame func(seq uint32, fra
 
 func (r *FrameReceiver) readLoop(onFrame func(seq uint32, frame []byte)) {
 	buf := make([]byte, 4096)
-	// defragmentation map: seq -> buffer
-	fragments := make(map[uint32][]byte)
+
+	const maxFragSets = 16
+	const fragTTL = 100 * time.Millisecond
+
+	type fragEntry struct {
+		data    []byte
+		count   uint16
+		got     uint16
+		expires time.Time
+	}
+	frags := make(map[uint32]*fragEntry, maxFragSets)
+	var dropCount uint64
 
 	for {
 		select {
@@ -160,9 +170,18 @@ func (r *FrameReceiver) readLoop(onFrame func(seq uint32, frame []byte)) {
 			continue
 		}
 
+		// Evict stale fragment sets
+		now := time.Now()
+		for s, e := range frags {
+			if now.After(e.expires) {
+				dropCount++
+				delete(frags, s)
+			}
+		}
+
 		seq       := binary.BigEndian.Uint32(buf[0:4])
 		tsLo32    := binary.BigEndian.Uint32(buf[4:8])
-		fragIdx   := binary.BigEndian.Uint16(buf[8:10])
+		_          = binary.BigEndian.Uint16(buf[8:10])  // fragIdx (tracked via entry.got)
 		fragCount := binary.BigEndian.Uint16(buf[10:12])
 		frameLen  := binary.BigEndian.Uint16(buf[12:14])
 		tsHi16    := binary.BigEndian.Uint16(buf[14:16])
@@ -175,17 +194,40 @@ func (r *FrameReceiver) readLoop(onFrame func(seq uint32, frame []byte)) {
 			fullFrame = make([]byte, len(payload))
 			copy(fullFrame, payload)
 		} else {
-			// Multi-fragment reassembly
-			curr, exists := fragments[seq]
+			// Multi-fragment reassembly with bounded window
+			entry, exists := frags[seq]
 			if !exists {
-				curr = make([]byte, 0, frameLen)
+				// Evict oldest if at capacity
+				if len(frags) >= maxFragSets {
+					var oldest uint32
+					var oldestTime time.Time
+					first := true
+					for s, e := range frags {
+						if first || e.expires.Before(oldestTime) {
+							oldest = s
+							oldestTime = e.expires
+							first = false
+						}
+					}
+					dropCount++
+					delete(frags, oldest)
+				}
+				entry = &fragEntry{
+					data:    make([]byte, 0, frameLen),
+					count:   fragCount,
+					expires: time.Now().Add(fragTTL),
+				}
+				frags[seq] = entry
 			}
-			curr = append(curr, payload...)
-			if fragIdx == fragCount-1 || len(curr) >= int(frameLen) {
-				fullFrame = curr
-				delete(fragments, seq)
+			// Append fragment payload
+			entry.data = append(entry.data, payload...)
+			entry.got++
+			entry.expires = time.Now().Add(fragTTL) // refresh TTL on activity
+
+			if entry.got >= entry.count || uint16(len(entry.data)) >= frameLen {
+				fullFrame = entry.data
+				delete(frags, seq)
 			} else {
-				fragments[seq] = curr
 				continue
 			}
 		}
@@ -205,6 +247,8 @@ func (r *FrameReceiver) readLoop(onFrame func(seq uint32, frame []byte)) {
 		if onFrame != nil {
 			onFrame(seq, fullFrame)
 		}
+
+		_ = dropCount // suppress unused warning if no logging
 	}
 }
 
