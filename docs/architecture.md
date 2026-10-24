@@ -135,7 +135,7 @@ Host                                              Drone
   |    (Host records Drone IP, proceeds to TCP)      |
 ```
 
-1. The Host sends a UDP broadcast to `255.255.255.255:4440` containing a `DISCOVER` request with its protocol version.
+1. The Host sends a `DISCOVER` request to UDP port 4440 from one socket per IPv4 interface, using both the subnet-directed broadcast (e.g. `192.168.4.255`) and `255.255.255.255`.
 2. `pwn4cd`, listening on `0.0.0.0:4440`, responds with a unicast `ANNOUNCE` packet containing the Drone's identity, firmware version, and capabilities.
 3. The Host extracts the Drone's IP from the response source address and opens the TCP/UDP data channels.
 

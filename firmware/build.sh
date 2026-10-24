@@ -68,6 +68,7 @@ PACKAGES="iw tcpdump-mini -ppp -ppp-mod-pppoe -firewall4 -odhcpd-ipv6only -odhcp
 
 chmod +x "$FW_DIR/files/etc/init.d/"* 2>/dev/null || true
 chmod +x "$FW_DIR/files/etc/uci-defaults/"* 2>/dev/null || true
+chmod +x "$FW_DIR/files/usr/lib/pwn4c/"*.sh 2>/dev/null || true
 
 # ── 1.1: Auto-stage pwn4cd binary + init script into firmware/files/ ───────
 if [ -z "${PWN4CD_BIN:-}" ]; then
@@ -119,6 +120,20 @@ if [ -n "${PWN4CD_BIN:-}" ]; then
     chmod 0755 "$FW_DIR/files/etc/init.d/pwn4cd"
     echo "[*] Staged: usr/sbin/pwn4cd + etc/init.d/pwn4cd"
 fi
+
+# ── rc.d symlinks for FILES/ init scripts ──────────────────────────────────
+# The ImageBuilder only creates /etc/rc.d links for *packaged* init scripts
+# (opkg postinst runs `enable`). Files dropped in via FILES/ never get them:
+# uci-defaults creates the links on first boot instead, which is exactly what
+# is lost when the first-boot jffs2 overlay migration fails. Baking the links
+# means the drone still comes up with LAN + daemon on an empty overlay.
+mkdir -p "$FW_DIR/files/etc/rc.d"
+for svc in S19pwn4c-net S21pwn4c-radio S95pwn4cd; do
+    name="${svc#S??}"
+    [ -f "$FW_DIR/files/etc/init.d/$name" ] || continue
+    ln -sfn "../init.d/$name" "$FW_DIR/files/etc/rc.d/$svc"
+    echo "[*] rc.d: $svc -> ../init.d/$name"
+done
 
 make image PROFILE="$PROFILE" PACKAGES="$PACKAGES" FILES="$FW_DIR/files/" \
     EXTRA_IMAGE_NAME="pwn4c" BIN_DIR="$IB_BIN_DIR"

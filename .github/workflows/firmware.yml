@@ -37,8 +37,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check build.sh syntax
-        run: sh -n firmware/build.sh
+      - name: Check shell syntax
+        run: |
+          sh -n firmware/build.sh
+          sh -n firmware/files/etc/init.d/pwn4c-net
+          sh -n firmware/files/etc/init.d/pwn4c-radio
+          sh -n firmware/files/usr/lib/pwn4c/provision.sh
+          sh -n firmware/files/etc/uci-defaults/99-pwn4c
 
   build-image:
     name: Build OpenWrt Image
@@ -91,15 +96,25 @@ jobs:
           WORK_DIR="$HOME/ib-work" OUT_DIR="$GITHUB_WORKSPACE/dist" \
             PWN4CD_BIN="$GITHUB_WORKSPACE/daemon/pwn4cd-mips" sh firmware/build.sh
 
-      - name: Assert daemon baked into image
+      - name: Assert daemon + provisioning baked into image
         run: |
           SQ=$(ls ~/ib-work/openwrt-imagebuilder-*/build_dir/target-*/linux-*/root.squashfs | head -n 1)
           rm -rf /tmp/rootfs && mkdir -p /tmp/rootfs
-          unsquashfs -d /tmp/rootfs "$SQ" usr/sbin/pwn4cd etc/init.d/pwn4cd
+          unsquashfs -d /tmp/rootfs "$SQ" etc usr
           test -x /tmp/rootfs/usr/sbin/pwn4cd
           test -f /tmp/rootfs/etc/init.d/pwn4cd
           file /tmp/rootfs/usr/sbin/pwn4cd | grep -q MIPS
-          echo "Daemon successfully verified inside root.squashfs!"
+          # First-boot resilience: the repair script, the shared provisioning
+          # file and the rc.d symlinks must be in the squashfs, not only in the
+          # overlay that uci-defaults writes on first boot.
+          test -x /tmp/rootfs/etc/init.d/pwn4c-net
+          test -f /tmp/rootfs/usr/lib/pwn4c/provision.sh
+          test -f /tmp/rootfs/etc/uci-defaults/99-pwn4c
+          for link in S19pwn4c-net S21pwn4c-radio S95pwn4cd; do
+            test -L "/tmp/rootfs/etc/rc.d/$link" || { echo "missing rc.d symlink $link"; exit 1; }
+            test -e "/tmp/rootfs/etc/rc.d/$link" || { echo "dangling rc.d symlink $link"; exit 1; }
+          done
+          echo "Daemon + first-boot provisioning verified inside root.squashfs!"
 
       - name: Upload Firmware Artifact
         uses: actions/upload-artifact@v4

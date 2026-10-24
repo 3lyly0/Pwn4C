@@ -95,6 +95,7 @@ Expected output (success):
 [*] 6. Uploading tarball to router (Raw HTTP POST)...
     -> Archive accepted successfully (code 0)!
 [*] 7. Triggering command injection...
+    -> Trigger request still running (netspeed is executing the payload).
 [*] 8. Waiting up to 1m0s for the router to request the firmware...
 [+] Router requested firmware; streaming pwn4c-firmware-mi4c-sysupgrade.bin
 [*] 9. Waiting up to 2m0s for the firmware transfer to complete...
@@ -102,6 +103,7 @@ Expected output (success):
 [+] Flash initiated: the router is running `mtd -r write /tmp/pwn4c.bin OS1` and should reboot into Pwn4C OS.
     Wait 60-90 seconds, then reconnect to the 192.168.4.0/24 network (DHCP or static 192.168.4.10/24).
     Verify with: pwn4c discover    (expected drone IP: 192.168.4.1)
+    Then set a root password: ssh root@192.168.4.1 passwd   (the image ships with none)
 [+] Flash transfer complete. Router should reboot into Pwn4C OS on 192.168.4.1.
 ```
 
@@ -280,14 +282,18 @@ pwn4c discover
 Expected:
 
 ```
-[*] Broadcasting discovery on 255.255.255.255:4440...
-[+] Drone found!
-    Address:    192.168.4.1
-    Firmware:   pwn4c-0.1.0
-    Uptime:     47s
-    Radio:      MT7628N 2.4GHz (idle)
-    Protocol:   v1
+[+] Probing all IPv4 interfaces (timeout 3s)...
+
+[+] Found 1 drone(s):
+
+IP ADDRESS     DRONE ID      STATE   CHIP     FIRMWARE   UPTIME
+----------     --------      -----   ----     --------   ------
+192.168.4.1:4444  pwn4c-89db  idle    MT7628N  1.0.0      47s
 ```
+
+If the drone is reachable but is not listed, restrict the probe to the LAN
+adapter: `pwn4c discover --interface "Ethernet"` (Windows) or
+`pwn4c discover --interface eth0` (Linux).
 
 ### Test Control Channel
 
