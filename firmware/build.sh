@@ -2,7 +2,7 @@
 # Pwn4C firmware image builder (Xiaomi Mi Router 4C / R4CM, MT7628N).
 #
 # Runs on any Linux host (or inside the Dockerfile in this directory):
-#   ./build.sh
+#   ./build.sh [--ssh-key <path_to_pub_key>] [--psk <secret>]
 #
 # Env overrides:
 #   WORK_DIR  scratch dir for the ImageBuilder tree (default: <this-dir>/.ib-work)
@@ -22,24 +22,54 @@ IB_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/ramips
 FW_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 WORK_DIR="${WORK_DIR:-$FW_DIR/.ib-work}"
 OUT_DIR="${OUT_DIR:-$FW_DIR/output}"
+SSH_KEY_FILE="${SSH_KEY_FILE:-}"
+PWN4C_PSK_VAL="${PWN4C_PSK_VAL:-}"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --ssh-key)
+            SSH_KEY_FILE="$2"
+            shift 2
+            ;;
+        --psk)
+            PWN4C_PSK_VAL="$2"
+            shift 2
+            ;;
+        *)
+            echo "[ERROR] Unknown argument: $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# §4.1: Optional operator-supplied SSH public key & PSK staging
+if [ -n "$SSH_KEY_FILE" ]; then
+    if [ ! -f "$SSH_KEY_FILE" ]; then
+        echo "[ERROR] SSH public key file not found: $SSH_KEY_FILE" >&2
+        exit 1
+    fi
+    mkdir -p "$FW_DIR/files/etc/dropbear"
+    cp "$SSH_KEY_FILE" "$FW_DIR/files/etc/dropbear/authorized_keys"
+    chmod 0600 "$FW_DIR/files/etc/dropbear/authorized_keys"
+    echo "[*] Staged SSH public key from $SSH_KEY_FILE into etc/dropbear/authorized_keys"
+fi
+
+if [ -n "$PWN4C_PSK_VAL" ]; then
+    mkdir -p "$FW_DIR/files/etc"
+    printf "%s\n" "$PWN4C_PSK_VAL" > "$FW_DIR/files/etc/pwn4c.key"
+    chmod 0600 "$FW_DIR/files/etc/pwn4c.key"
+    echo "[*] Staged control channel PSK into etc/pwn4c.key"
+fi
 
 # Keep the squashfs rootfs well under the 4 MB budget (see docs/hardware.md):
 # add monitor-mode tooling, drop everything the headless drone never uses.
 # NOTE: dnsmasq stays — it is the drone's DHCP server on 192.168.4.0/24.
-# (23.05 names: firewall4 + odhcp6c; plain -firewall/-odhcpd match nothing.)
 PACKAGES="iw tcpdump-mini -ppp -ppp-mod-pppoe -firewall4 -odhcpd-ipv6only -odhcp6c -kmod-ipv6"
 
-# ImageBuilder copies files/ verbatim but does NOT chmod them automatically.
-# Init scripts in etc/init.d/ must be executable on the target filesystem.
-# We set exec bits here before the make call so they land correctly in squashfs.
 chmod +x "$FW_DIR/files/etc/init.d/"* 2>/dev/null || true
-# The uci-defaults script is sourced by sh (not exec'd directly), but making it
-# executable documents intent and is harmless.
 chmod +x "$FW_DIR/files/etc/uci-defaults/"* 2>/dev/null || true
 
 # ── 1.1: Auto-stage pwn4cd binary + init script into firmware/files/ ───────
-# If PWN4CD_BIN is not explicitly set, attempt to cross-compile the daemon
-# automatically so a standalone `./build.sh` always produces a full image.
 if [ -z "${PWN4CD_BIN:-}" ]; then
     DAEMON_DIR="$(cd "$FW_DIR/../daemon" 2>/dev/null && pwd)" || true
     if [ -d "$DAEMON_DIR" ] && [ -f "$DAEMON_DIR/Makefile" ]; then
@@ -73,15 +103,8 @@ fi
 
 echo "[*] Building image for PROFILE=${PROFILE}..."
 cd "$IB_DIR"
-# NOTE: intermediates stay in WORK_DIR; OUT_DIR receives only the final
-# image + checksums (keeps artifacts and releases clean).
 IB_BIN_DIR="$WORK_DIR/imagebuilder-bin"
 
-# Optional: bake the pwn4cd implant daemon into the image.
-# CI sets PWN4CD_BIN to a cross-compiled mipsel static binary; the init
-# script comes from the repo. Images built without it are plain OpenWrt
-# (dev variant) — 99-pwn4c enables the service only if the binary exists.
-# PWN4CD_BIN may also be auto-resolved above from the daemon/ cross-compile.
 if [ -n "${PWN4CD_BIN:-}" ]; then
     if [ ! -f "$PWN4CD_BIN" ]; then
         echo "[ERROR] PWN4CD_BIN not found: $PWN4CD_BIN" >&2
@@ -91,8 +114,6 @@ if [ -n "${PWN4CD_BIN:-}" ]; then
     mkdir -p "$FW_DIR/files/usr/sbin"
     cp "$PWN4CD_BIN" "$FW_DIR/files/usr/sbin/pwn4cd"
     chmod 0755 "$FW_DIR/files/usr/sbin/pwn4cd"
-    # Stage the init script from daemon/etc/init.d/ into firmware/files/
-    # so freshly-flashed routers automatically launch pwn4cd on boot.
     mkdir -p "$FW_DIR/files/etc/init.d"
     cp "$FW_DIR/../daemon/etc/init.d/pwn4cd" "$FW_DIR/files/etc/init.d/pwn4cd"
     chmod 0755 "$FW_DIR/files/etc/init.d/pwn4cd"
@@ -107,11 +128,6 @@ SYSUPGRADE="$(ls "$IB_BIN_DIR/"*sysupgrade.bin | head -n 1)"
 cp "$SYSUPGRADE" "$OUT_DIR/pwn4c-firmware-mi4c-sysupgrade.bin"
 
 # ── Rootfs size guard (4 MB budget) ────────────────────────────────────────
-# Measure the TRUE root filesystem (root.squashfs), NOT the combined
-# sysupgrade image (kernel + rootfs, ~5.5 MB). The "*squashfs-sysupgrade.bin"
-# name matches the combined image — measuring it against the 4 MB budget
-# would fail every build. root.squashfs lives in the ImageBuilder tree
-# (BIN_DIR only gets the combined images).
 ROOTFS="$(ls "$IB_DIR"/build_dir/target-*/linux-*/root.squashfs 2>/dev/null | head -n 1)"
 if [ -z "$ROOTFS" ]; then
     ROOTFS="$(ls "$IB_BIN_DIR/"*root.squashfs 2>/dev/null | head -n 1)"
@@ -167,7 +183,6 @@ sha256sum pwn4c-firmware-mi4c-sysupgrade.bin > checksums.sha256
 ls -l pwn4c-firmware-mi4c-sysupgrade.bin
 cat checksums.sha256
 
-# Fail hard if any assertion failed.
 if [ -n "${BUILD_FAIL:-}" ]; then
     echo "[ERROR] One or more build assertions failed." >&2
     exit 1

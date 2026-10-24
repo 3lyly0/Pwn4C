@@ -2,28 +2,18 @@
  * main.c — pwn4cd: Wi-Fi implant daemon for MediaTek MT7628N / OpenWrt.
  *
  * Usage: pwn4cd [--mock] [--iface <wlan>] [--eth <eth>]
+ *               [--psk <secret>] [--psk-file <path>] [--idle-timeout <sec>]
  *
- *   --mock     Run on x86_64 without hardware; replay canned frames.
- *   --iface    Wireless interface name (default: wlan0)
- *   --eth      Ethernet interface name (default: eth0)
+ *   --mock              Run on x86_64 without hardware; replay canned frames.
+ *   --iface IF          Wireless interface name (default: wlan0)
+ *   --eth   IF          Ethernet interface name (default: eth0)
+ *   --psk   SECRET      Require HMAC-SHA256 challenge-response auth on TCP :4444
+ *   --psk-file PATH     Read pre-shared key from file (default: /etc/pwn4c.key if present)
+ *   --idle-timeout SEC  Dead-man failsafe: stop monitor after SEC seconds of idle
  *
  * Architecture: single-process, select(2)-driven event loop.
  *   No threads.  No dynamic allocation in the frame path.
- *   Fixed 64 KB ring buffer in BSS (static storage, not stack).
- *
- * Lifecycle:
- *   1. Parse args, init syslog.
- *   2. Read MAC from /sys/class/net/<eth>/address.
- *   3. Bind discovery UDP :4440.
- *   4. Bind control TCP :4444.
- *   5. Enter select() loop:
- *      - disc_fd readable  -> disc_handle()
- *      - ctrl_listen_fd    -> ctrl_accept()
- *      - ctrl_client_fd    -> ctrl_recv()
- *      - always (if monitoring): capture_read_frame() + stream_send_next()
- *   6. SIGTERM -> cleanup, exit 0.
- *
- * SIGTERM handler sets a volatile flag; the main loop checks it.
+ *   Fixed 512 KiB ring buffer in BSS (static storage, not stack).
  */
 
 #include "pwn4cd.h"
@@ -43,7 +33,7 @@ void mock_tick(daemon_t *d);
 /* Declare ctrl_recv (control.c) */
 int ctrl_recv(daemon_t *d);
 
-/* ── Static ring buffer (64 KB, in BSS — avoids stack pressure on MIPS) ──── */
+/* ── Static ring buffer (512 KiB, in BSS — avoids stack pressure on MIPS) ─── */
 static uint8_t g_ring[RING_BYTES];
 
 /* ── Singleton daemon state ───────────────────────────────────────────────── */
@@ -62,10 +52,14 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
         "Usage: %s [--mock] [--iface <wlan_iface>] [--eth <eth_iface>]\n"
+        "          [--psk <secret>] [--psk-file <path>] [--idle-timeout <sec>]\n"
         "\n"
-        "  --mock       Run without hardware (x86_64 development mode)\n"
-        "  --iface IF   Wireless interface (default: wlan0)\n"
-        "  --eth   IF   Ethernet interface (default: eth0)\n",
+        "  --mock              Run without hardware (x86_64 development mode)\n"
+        "  --iface IF          Wireless interface (default: wlan0)\n"
+        "  --eth   IF          Ethernet interface (default: eth0)\n"
+        "  --psk   SECRET      Require HMAC-SHA256 PSK authentication on TCP :4444\n"
+        "  --psk-file PATH     Read PSK from file (default: /etc/pwn4c.key if present)\n"
+        "  --idle-timeout SEC  Dead-man failsafe timeout in seconds (0 = disabled)\n",
         prog);
 }
 
@@ -74,26 +68,29 @@ int main(int argc, char *argv[])
 {
     int  i;
     struct sigaction sa;
+    const char *psk_file = PSK_FILE_DEFAULT;
+    bool explicit_psk = false;
 
     /* ── Initialize daemon state ────────────────────────────────────────── */
     memset(&g_daemon, 0, sizeof(g_daemon));
-    g_daemon.ring_buf        = g_ring;
-    g_daemon.ring_head       = 0;
-    g_daemon.ring_tail       = 0;
-    g_daemon.disc_fd         = -1;
-    g_daemon.ctrl_listen_fd  = -1;
-    g_daemon.ctrl_client_fd  = -1;
-    g_daemon.stream_fd       = -1;
-    g_daemon.pkt_fd          = -1;
-    g_daemon.tx_fd           = -1;
-    g_daemon.nl_fd           = -1;
-    g_daemon.nl_family_id    = -1;
-    g_daemon.state           = STATE_IDLE;
-    g_daemon.radio_mode      = RADIO_DOWN;
-    g_daemon.channel         = 1;
-    g_daemon.tx_power_dbm    = DAEMON_MAX_TXPWR;
-    g_daemon.mock_mode       = false;
-    g_daemon.start_sec       = util_monotonic_sec();
+    g_daemon.ring_buf          = g_ring;
+    g_daemon.ring_head         = 0;
+    g_daemon.ring_tail         = 0;
+    g_daemon.disc_fd           = -1;
+    g_daemon.ctrl_listen_fd    = -1;
+    g_daemon.ctrl_client_fd    = -1;
+    g_daemon.stream_fd         = -1;
+    g_daemon.pkt_fd            = -1;
+    g_daemon.tx_fd             = -1;
+    g_daemon.nl_fd             = -1;
+    g_daemon.nl_family_id      = -1;
+    g_daemon.state             = STATE_IDLE;
+    g_daemon.radio_mode        = RADIO_DOWN;
+    g_daemon.channel           = 1;
+    g_daemon.tx_power_dbm      = DAEMON_MAX_TXPWR;
+    g_daemon.mock_mode         = false;
+    g_daemon.start_sec         = util_monotonic_sec();
+    g_daemon.last_activity_sec = g_daemon.start_sec;
 
     /* Default interface names */
     (void)snprintf(g_daemon.wlan_iface, sizeof(g_daemon.wlan_iface),
@@ -113,6 +110,20 @@ int main(int argc, char *argv[])
             i++;
             (void)snprintf(g_daemon.eth_iface, sizeof(g_daemon.eth_iface),
                            "%s", argv[i]);
+        } else if (strcmp(argv[i], "--psk") == 0 && i + 1 < argc) {
+            i++;
+            (void)snprintf(g_daemon.psk, sizeof(g_daemon.psk), "%s", argv[i]);
+            g_daemon.psk_required = (g_daemon.psk[0] != '\0');
+            explicit_psk = true;
+        } else if (strcmp(argv[i], "--psk-file") == 0 && i + 1 < argc) {
+            i++;
+            psk_file = argv[i];
+        } else if (strcmp(argv[i], "--idle-timeout") == 0 && i + 1 < argc) {
+            i++;
+            g_daemon.idle_timeout_sec = atoi(argv[i]);
+            if (g_daemon.idle_timeout_sec < 0) {
+                g_daemon.idle_timeout_sec = 0;
+            }
         } else if (strcmp(argv[i], "--help") == 0
                 || strcmp(argv[i], "-h") == 0) {
             usage(argv[0]);
@@ -124,13 +135,22 @@ int main(int argc, char *argv[])
         }
     }
 
+    /* Load PSK from file if not explicitly passed via --psk (§4.1) */
+    if (!explicit_psk && psk_file && psk_file[0] != '\0') {
+        if (util_read_file(psk_file, g_daemon.psk, sizeof(g_daemon.psk)) > 0) {
+            g_daemon.psk_required = true;
+        }
+    }
+
     /* ── Open syslog ────────────────────────────────────────────────────── */
     openlog("pwn4cd", LOG_PID | LOG_CONS, LOG_DAEMON);
-    util_log("main", "pwn4cd %s starting (mock=%s, iface=%s, eth=%s)",
+    util_log("main", "pwn4cd %s starting (mock=%s, iface=%s, eth=%s, psk=%s, idle_timeout=%ds)",
              DAEMON_VERSION,
              g_daemon.mock_mode ? "yes" : "no",
              g_daemon.wlan_iface,
-             g_daemon.eth_iface);
+             g_daemon.eth_iface,
+             g_daemon.psk_required ? "enabled" : "off",
+             g_daemon.idle_timeout_sec);
 
     /* ── Install signal handlers ────────────────────────────────────────── */
     memset(&sa, 0, sizeof(sa));
@@ -152,7 +172,6 @@ int main(int argc, char *argv[])
         if (util_read_mac(g_daemon.wlan_iface, g_daemon.base_mac) < 0) {
             util_log("main", "cannot read MAC from %s or %s; using fallback",
                      g_daemon.eth_iface, g_daemon.wlan_iface);
-            /* Will be overwritten by mock_run() if in mock mode */
         }
     }
 
@@ -210,8 +229,7 @@ int main(int argc, char *argv[])
         }
 
         /* If frames are pending in TX injection queue and are not paced,
-         * monitor write readiness (§3.3).  Paced queues are driven by the
-         * select() timeout below instead of busy-spinning on a writable fd. */
+         * monitor write readiness (§3.3). */
         if (monitoring && g_daemon.tx_q.count > 0
          && g_daemon.tx_q.interval_ms == 0
          && g_daemon.tx_fd >= 0 && !g_daemon.mock_mode) {
@@ -219,11 +237,15 @@ int main(int argc, char *argv[])
             if (g_daemon.tx_fd > maxfd) { maxfd = g_daemon.tx_fd; }
         }
 
-        /* Timeout: 10ms while monitoring (mock frame pacing + stream drain);
-         * block indefinitely when idle so the 580MHz SoC mostly sleeps.
-         * fd events (discovery/control) still wake select() either way. */
+        /* Timeout: 10ms while monitoring; 1s if dead-man timer active;
+         * block indefinitely when completely idle. */
         tv.tv_sec  = 0;
         tv.tv_usec = 10000;  /* 10ms */
+        if (!monitoring && !g_daemon.hop_enabled && g_daemon.idle_timeout_sec > 0) {
+            tv.tv_sec  = 1;
+            tv.tv_usec = 0;
+        }
+
         if (g_daemon.hop_enabled && g_daemon.hop_channel_count > 0) {
             int64_t now_ms = util_monotonic_ms();
             int64_t diff_ms = g_daemon.next_hop_ms - now_ms;
@@ -253,7 +275,8 @@ int main(int argc, char *argv[])
             }
         }
         {
-            struct timeval *tvp = (monitoring || g_daemon.hop_enabled) ? &tv : NULL;
+            struct timeval *tvp = (monitoring || g_daemon.hop_enabled || g_daemon.idle_timeout_sec > 0)
+                                ? &tv : NULL;
             fd_set *wset = (monitoring && g_daemon.tx_q.count > 0
                          && g_daemon.tx_q.interval_ms == 0
                          && g_daemon.tx_fd >= 0 && !g_daemon.mock_mode) ? &wfds : NULL;
@@ -265,6 +288,17 @@ int main(int argc, char *argv[])
             if (errno == EINTR) { continue; }
             util_log("main", "select: %s", strerror(errno));
             break;
+        }
+
+        /* ── Dead-man failsafe check (§4.2) ───────────────────────────── */
+        if (g_daemon.idle_timeout_sec > 0 && g_daemon.ctrl_client_fd >= 0) {
+            int64_t now_sec = util_monotonic_sec();
+            if (now_sec - g_daemon.last_activity_sec >= (int64_t)g_daemon.idle_timeout_sec) {
+                util_log("main", "dead-man failsafe: client idle for %ds — stopping monitor",
+                         g_daemon.idle_timeout_sec);
+                ctrl_close_client(&g_daemon);
+                continue;
+            }
         }
 
         /* ── Autonomous channel hopping (§3.2) ────────────────────────── */
@@ -297,7 +331,6 @@ int main(int argc, char *argv[])
         /* ── Non-blocking TX frame injection drain (§3.3, §3.5.7) ─────── */
         if (monitoring && g_daemon.tx_q.count > 0) {
             if (g_daemon.tx_q.interval_ms > 0) {
-                /* Paced mode: transmit at most one frame per interval. */
                 int64_t now_ms = util_monotonic_ms();
                 if (now_ms >= g_daemon.tx_q.next_tx_ms) {
                     (void)tx_queue_drain_step(&g_daemon);
@@ -314,23 +347,26 @@ int main(int argc, char *argv[])
                 }
             }
 
-            /* Pacing is a property of the current burst; clear it when idle. */
             if (g_daemon.tx_q.count == 0) {
                 g_daemon.tx_q.interval_ms = 0;
                 g_daemon.tx_q.next_tx_ms  = 0;
             }
         }
 
-        /* ── Capture frames ───────────────────────────────────────────── */
+        /* ── Capture frames (with §4.2 Self-Healing on interface drop) ── */
         if (monitoring) {
             if (g_daemon.mock_mode) {
                 mock_tick(&g_daemon);
             } else if (g_daemon.pkt_fd >= 0
                     && FD_ISSET(g_daemon.pkt_fd, &rfds)) {
-                /* Drain up to 32 frames per iteration */
                 int cap_limit = 32;
                 while (cap_limit-- > 0) {
                     int cr = capture_read_frame(&g_daemon);
+                    if (cr == -2) {
+                        /* §4.2: Self-heal interface if wlan0 dropped */
+                        (void)capture_recover_interface(&g_daemon);
+                        break;
+                    }
                     if (cr <= 0) { break; }
                 }
             }
@@ -338,11 +374,14 @@ int main(int argc, char *argv[])
 
         /* ── Stream frames to host ────────────────────────────────────── */
         if (monitoring && g_daemon.stream_fd >= 0 && g_daemon.host_ip != 0) {
-            /* Drain ring: up to 16 frames per iteration to avoid starvation */
             int strim = 16;
             while (strim-- > 0) {
                 int sr = stream_send_next(&g_daemon);
-                if (sr <= 0) { break; }
+                if (sr > 0) {
+                    g_daemon.last_activity_sec = util_monotonic_sec();
+                } else {
+                    break;
+                }
             }
 
             /* Push BUFFER_OVERFLOW async event if drops occurred */
@@ -372,7 +411,6 @@ int main(int argc, char *argv[])
     /* ── Shutdown ───────────────────────────────────────────────────────── */
     util_log("main", "SIGTERM received — shutting down");
 
-    /* Stop monitor / restore radio if active */
     if (g_daemon.state == STATE_MONITORING
      || g_daemon.state == STATE_INJECTING) {
         capture_close(&g_daemon);
@@ -380,7 +418,6 @@ int main(int argc, char *argv[])
         (void)radio_exit_monitor(&g_daemon);
     }
 
-    /* Close all sockets */
     if (g_daemon.ctrl_client_fd >= 0) { close(g_daemon.ctrl_client_fd); }
     if (g_daemon.ctrl_listen_fd >= 0) { close(g_daemon.ctrl_listen_fd); }
     if (g_daemon.disc_fd >= 0)        { close(g_daemon.disc_fd); }

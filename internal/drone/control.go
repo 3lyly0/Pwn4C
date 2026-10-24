@@ -3,6 +3,9 @@ package drone
 import (
 	"bufio"
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -11,6 +14,9 @@ import (
 	"sync"
 	"time"
 )
+
+// DefaultPSK holds the global pre-shared key configured via --psk or PWN4C_PSK.
+var DefaultPSK string
 
 // ControlClient manages the TCP control connection with pwn4cd
 type ControlClient struct {
@@ -56,6 +62,7 @@ type StatusData struct {
 	RingOverruns    uint64 `json:"ring_overruns"`
 	InjectFailures  uint64 `json:"inject_failures"`
 	KernelDrops     uint32 `json:"kernel_drops"`
+	IfaceRecoveries uint64 `json:"iface_recoveries"`
 }
 
 // DiagnosticsData represents system health in GET_DIAGNOSTICS
@@ -87,7 +94,8 @@ type BaseResponse struct {
 	Error  *ControlError   `json:"error,omitempty"`
 }
 
-// ConnectControl dials the drone's TCP control port
+// ConnectControl dials the drone's TCP control port and performs PSK
+// challenge-response authentication if DefaultPSK or PWN4C_PSK is configured.
 func ConnectControl(droneAddr string, timeout time.Duration) (*ControlClient, error) {
 	if !strings.Contains(droneAddr, ":") {
 		droneAddr = fmt.Sprintf("%s:%d", droneAddr, DefaultControlPort)
@@ -98,10 +106,66 @@ func ConnectControl(droneAddr string, timeout time.Duration) (*ControlClient, er
 		return nil, fmt.Errorf("connect to %s: %w", droneAddr, err)
 	}
 
-	return &ControlClient{
+	client := &ControlClient{
 		conn:   conn,
 		reader: bufio.NewReader(conn),
-	}, nil
+	}
+
+	psk := DefaultPSK
+	if psk == "" {
+		psk = os.Getenv("PWN4C_PSK")
+	}
+	if psk != "" {
+		if err := client.Authenticate(psk); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("authentication failed: %w", err)
+		}
+	}
+
+	return client, nil
+}
+
+// Authenticate performs the HMAC-SHA256 challenge-response handshake (§4.1)
+func (c *ControlClient) Authenticate(psk string) error {
+	resp, err := c.SendCommand("GET_CHALLENGE", nil)
+	if err != nil {
+		return fmt.Errorf("GET_CHALLENGE: %w", err)
+	}
+	if strings.ToLower(resp.Status) != "ok" {
+		if resp.Error != nil {
+			return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+		}
+		return fmt.Errorf("failed to request challenge")
+	}
+
+	var chal struct {
+		Nonce        string `json:"nonce"`
+		AuthRequired bool   `json:"auth_required"`
+	}
+	if err := json.Unmarshal(resp.Data, &chal); err != nil {
+		return fmt.Errorf("unmarshal challenge: %w", err)
+	}
+	if chal.Nonce == "" {
+		return fmt.Errorf("empty challenge nonce returned by drone")
+	}
+
+	mac := hmac.New(sha256.New, []byte(psk))
+	mac.Write([]byte(chal.Nonce))
+	sig := hex.EncodeToString(mac.Sum(nil))
+
+	authResp, err := c.SendCommand("AUTH", map[string]interface{}{
+		"hmac": sig,
+	})
+	if err != nil {
+		return fmt.Errorf("AUTH: %w", err)
+	}
+	if strings.ToLower(authResp.Status) != "ok" {
+		if authResp.Error != nil {
+			return fmt.Errorf("%s: %s", authResp.Error.Code, authResp.Error.Message)
+		}
+		return fmt.Errorf("HMAC rejected by drone")
+	}
+	return nil
 }
 
 // Close closes the control connection
@@ -334,12 +398,13 @@ func (c *ControlClient) SendInjection(frameHex string, count int, intervalMs int
 
 	var data struct {
 		FramesSent   int `json:"frames_sent"`
+		FramesQueued int `json:"frames_queued"`
 		FramesFailed int `json:"frames_failed"`
 	}
 	if err := json.Unmarshal(resp.Data, &data); err != nil {
 		return 0, 0, fmt.Errorf("unmarshal injection result: %w", err)
 	}
-	return data.FramesSent, data.FramesFailed, nil
+	return data.FramesSent + data.FramesQueued, data.FramesFailed, nil
 }
 
 // SetMAC updates the monitor MAC address (or randomizes if empty)
