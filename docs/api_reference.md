@@ -11,7 +11,15 @@ All communication between the Host (`pwn4c`) and the Drone (`pwn4cd`) occurs ove
 
 ### Discovery Request
 
-The Host broadcasts this packet to `255.255.255.255:4440`.
+The Host sends this packet from a socket bound to each usable IPv4 interface
+address, to both the subnet-directed broadcast (e.g. `192.168.4.255:4440`) and
+the limited broadcast `255.255.255.255:4440`. The Drone replies unicast to the
+source address and port it observed.
+
+> Binding one socket per interface (instead of a single `0.0.0.0` socket) is
+> required on multi-homed hosts: a packet sent to `255.255.255.255` from a
+> wildcard socket egresses the lowest-metric interface, which is often a
+> Hyper-V/WSL/VMware adapter rather than the LAN port.
 
 ```json
 {
@@ -87,9 +95,9 @@ If the protocol version is unsupported:
 
 ### Timing
 
-- The Host sends up to 3 discovery broadcasts at 1-second intervals.
+- The Host sends up to 3 discovery rounds, 50 ms apart, to every interface.
 - The Drone must respond within 500 ms of receiving a `DISCOVER` packet.
-- If no response after 3 attempts, the Host reports a discovery failure.
+- If no response arrives before the timeout, the Host reports that no drones were discovered.
 
 ---
 

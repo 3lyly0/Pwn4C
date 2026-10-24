@@ -11,7 +11,8 @@ import (
 )
 
 var (
-	discoverTimeout int
+	discoverTimeout   int
+	discoverInterface string
 )
 
 var discoverCmd = &cobra.Command{
@@ -19,9 +20,13 @@ var discoverCmd = &cobra.Command{
 	Short: "Scan local subnet for active Pwn4C drone implants",
 	Long:  "Broadcasts discovery beacons over the local network interface to detect listening Pwn4C implants.",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("[+] Broadcasting discovery probes (timeout %ds)...\n", discoverTimeout)
+		if discoverInterface != "" {
+			fmt.Printf("[+] Probing interface %s (timeout %ds)...\n", discoverInterface, discoverTimeout)
+		} else {
+			fmt.Printf("[+] Probing all IPv4 interfaces (timeout %ds)...\n", discoverTimeout)
+		}
 
-		drones, err := drone.Discover(time.Duration(discoverTimeout)*time.Second, "")
+		drones, err := drone.Discover(time.Duration(discoverTimeout)*time.Second, discoverInterface)
 		if err != nil {
 			fmt.Printf("[!] Discovery error: %v\n", err)
 			os.Exit(1)
@@ -29,6 +34,8 @@ var discoverCmd = &cobra.Command{
 
 		if len(drones) == 0 {
 			fmt.Println("[-] No active Pwn4C drones discovered on the local subnet.")
+			fmt.Println("    If the drone is reachable (ping 192.168.4.1), retry with: pwn4c discover --interface <name>")
+			fmt.Println("    Windows: run `Get-NetIPAddress -AddressFamily IPv4` to list interface names.")
 			return
 		}
 
@@ -41,7 +48,7 @@ var discoverCmd = &cobra.Command{
 			uptime := time.Duration(d.Announce.UptimeSeconds) * time.Second
 			fmt.Fprintf(w, "%s:%d\t%s\t%s\t%s\t%s\t%s\n",
 				d.IP,
-				d.Announce.ControlPort,
+				d.Port,
 				d.Announce.DroneID,
 				d.Announce.Radio.State,
 				d.Announce.Radio.Chipset,
@@ -56,5 +63,6 @@ var discoverCmd = &cobra.Command{
 
 func init() {
 	discoverCmd.Flags().IntVarP(&discoverTimeout, "timeout", "t", 3, "Discovery timeout in seconds")
+	discoverCmd.Flags().StringVarP(&discoverInterface, "interface", "i", "", "Only probe this network interface (default: all IPv4 interfaces)")
 	rootCmd.AddCommand(discoverCmd)
 }

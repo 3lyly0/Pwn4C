@@ -1,0 +1,37 @@
+#!/bin/sh /etc/rc.common
+# /etc/init.d/pwn4c-net
+# Boot-time repair of the Pwn4C network identity.
+#
+# Why this exists: on the very first boot after flashing, rootfs_data is blank,
+# so OpenWrt runs from a temporary tmpfs overlay while it formats jffs2 in the
+# background. Everything uci-defaults writes during that window has to be
+# migrated into the real overlay afterwards. When that migration fails
+# ("mount_root: failed to sync jffs2 overlay"), the drone comes back with the
+# stock 192.168.1.1 config, no rc.d symlinks and no daemon.
+#
+# This script runs at S19 — after /etc/init.d/boot (S10, which applies
+# uci-defaults) and before network (S20) — and re-applies provisioning only
+# when the marker file written by provision.sh is missing. If the operator has
+# ever changed the config, the marker exists and nothing is touched.
+#
+# The rc.d symlink for this script is baked into the image by firmware/build.sh,
+# so it runs even when the overlay is empty.
+
+START=19
+STOP=90
+USE_PROCD=0
+
+PROVISION=/usr/lib/pwn4c/provision.sh
+MARKER=/etc/pwn4c.initialized
+
+start() {
+    [ -e "$MARKER" ] && return 0
+
+    if [ ! -f "$PROVISION" ]; then
+        logger -t pwn4c-net "provisioning script missing ($PROVISION); cannot repair config"
+        return 1
+    fi
+
+    logger -t pwn4c-net "first-boot config not persisted; re-applying Pwn4C defaults"
+    . "$PROVISION"
+}

@@ -7,8 +7,8 @@
 `pwn4c discover` times out with no response:
 
 ```
-[*] Broadcasting discovery on 255.255.255.255:4440...
-[!] No Drone found after 3 attempts.
+[+] Probing all IPv4 interfaces (timeout 3s)...
+[-] No active Pwn4C drones discovered on the local subnet.
 ```
 
 ### Diagnosis Checklist
@@ -49,32 +49,35 @@ Verify: `ping 192.168.4.1`
 
 **3. Verify broadcast routing**
 
-UDP broadcasts must egress on the correct interface. If the Host has multiple interfaces (Wi-Fi, VPN, etc.), the OS may route broadcasts out the wrong one.
+`pwn4c discover` binds one UDP socket per IPv4 interface and sends both the
+subnet-directed broadcast (e.g. `192.168.4.255`) and the limited broadcast
+(`255.255.255.255`) from it. That way a multi-homed host — Hyper-V/WSL
+`vEthernet`, VMware VMnet, VPN adapters — cannot silently send the probe out
+the wrong NIC. Send failures are reported instead of being ignored.
 
-```bash
-# Linux: force discovery on a specific interface
-pwn4c discover --interface eth0
-
-# Check broadcast routing
-ip route get 255.255.255.255
-```
-
-Fix broadcast routing if it exits via the wrong interface:
+To restrict the probe to one interface, name it explicitly:
 
 ```bash
 # Linux
-sudo ip route add 255.255.255.255/32 dev eth0
-
-# macOS
-sudo route add -host 255.255.255.255 -interface en0
+pwn4c discover --interface eth0
 ```
-
-On Windows, ensure the Ethernet adapter has a lower metric than Wi-Fi:
 
 ```powershell
-Set-NetIPInterface -InterfaceAlias "Ethernet" -InterfaceMetric 10
-Set-NetIPInterface -InterfaceAlias "Wi-Fi" -InterfaceMetric 100
+# Windows: list interface names first
+Get-NetIPAddress -AddressFamily IPv4 | Select-Object InterfaceAlias,IPAddress
+pwn4c discover --interface "Ethernet"
 ```
+
+If discovery still fails, run it again with `--interface` for the LAN adapter.
+A send error such as `discovery broadcast failed on every interface` points at
+the host (firewall/permissions), not at the drone.
+
+> **Why the old single-broadcast probe failed on Windows:** a packet sent to
+> `255.255.255.255` from a socket bound to `0.0.0.0` follows the lowest
+> *interface metric*, not the route to the drone's subnet. With WSL/Hyper-V
+> adapters (metric 15) and Ethernet (metric 35), the probe left via the virtual
+> switch and never reached the router, while TCP to the same router worked
+> normally.
 
 **4. Firewall blocking UDP port 4440**
 
@@ -288,13 +291,63 @@ init system blocks new services.
 [!] Timeout: Drone did not respond.
 ```
 
-**Cause:** The firmware was written but did not boot successfully.
+**Cause:** The firmware was written but did not boot successfully, or it booted
+with the wrong LAN address (see the JFFS2 section below).
 
 **Fix:**
 1. Wait an additional 60 seconds. First boot with JFFS2 initialization can be slow.
 2. Try `ping 192.168.4.1`. If reachable, try `pwn4c discover` again.
-3. Connect via UART serial console to observe boot output and identify kernel panics or mount failures.
-4. Reflash via UART if the image is corrupted.
+3. Try `ping 192.168.1.1` as well — if that answers, the overlay did not
+   persist and the drone fell back to the stock OpenWrt LAN address. See
+   [`mount_root: failed to sync jffs2 overlay`](#mount_root-failed-to-sync-jffs2-overlay).
+4. Connect via UART serial console to observe boot output and identify kernel panics or mount failures.
+5. Reflash via UART if the image is corrupted.
+
+### `mount_root: failed to sync jffs2 overlay`
+
+```
+user.notice kernel: mount_root: jffs2 not ready yet, using temporary tmpfs overlay
+daemon.info mount_root: synchronizing overlay
+daemon.err mount_root: failed to sync jffs2 overlay
+```
+
+**What happened:** on the very first boot after flashing, `rootfs_data`
+(`/dev/mtdblock9`) is blank, so OpenWrt boots on a temporary tmpfs overlay
+while it formats JFFS2 in the background. When the format finishes, fstools
+copies the tmpfs upper layer into the new JFFS2 overlay
+(`cp -a /tmp/root/upper/* /`) and logs the error if that copy returns non-zero.
+Anything written during that ~60–90 s window — including everything
+`/etc/uci-defaults/99-pwn4c` sets — may therefore be partially or fully lost.
+
+**Symptom after the next reboot:** the drone comes back at the stock
+`192.168.1.1`, `pwn4cd` is not running, and `/etc/rc.d/S95pwn4cd` is missing.
+
+**Built-in protection:** the image bakes `/etc/rc.d/S19pwn4c-net` into the
+squashfs (not the overlay), and that script re-applies
+`/usr/lib/pwn4c/provision.sh` whenever the marker `/etc/pwn4c.initialized` is
+missing. So a wiped overlay is repaired before `network` starts, and the drone
+returns on `192.168.4.1` without a reflash. It never touches a config that has
+the marker, so operator changes are preserved.
+
+**Verify persistence once, after the first flash:**
+
+```bash
+ssh root@192.168.4.1
+uci get network.lan.ipaddr        # expect 192.168.4.1
+ls /etc/rc.d/S95pwn4cd            # expect the symlink
+ls /etc/pwn4c.initialized         # expect the marker
+reboot
+# after ~60 s:
+ping 192.168.4.1
+pwn4c discover
+```
+
+If the marker is gone after a reboot, the overlay migration failed again; the
+repair script has re-applied the defaults (check
+`logread | grep pwn4c-net`), but the flash may be worn or the overlay
+partition may be too small. Re-flash with `sysupgrade -n` to recreate
+`rootfs_data` from scratch.
+
 
 ---
 
