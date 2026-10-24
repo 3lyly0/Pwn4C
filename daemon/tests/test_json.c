@@ -190,11 +190,41 @@ static void test_real_commands(void)
     CHECK("unk cmd", r == 0 && strcmp(cmd, "FROBNICATE") == 0);
 }
 
+static void test_json_get_int_array(void)
+{
+    int arr[8];
+    size_t len = 0;
+    int r;
+
+    /* 1. Happy path */
+    r = json_get_int_array("{\"channels\":[1,6,11],\"dwell_ms\":250}", "channels",
+                           arr, 8, &len);
+    CHECK("get_int_array happy", r == 0 && len == 3 && arr[0] == 1 && arr[1] == 6 && arr[2] == 11);
+
+    /* 2. Whitespace and formatting */
+    r = json_get_int_array("{\"channels\": [ 1 , 2 , 3 ] }", "channels",
+                           arr, 8, &len);
+    CHECK("get_int_array spaces", r == 0 && len == 3 && arr[0] == 1 && arr[1] == 2 && arr[2] == 3);
+
+    /* 3. Empty array */
+    r = json_get_int_array("{\"channels\":[]}", "channels", arr, 8, &len);
+    CHECK("get_int_array empty", r == 0 && len == 0);
+
+    /* 4. Missing key */
+    r = json_get_int_array("{\"other\":[1,2]}", "channels", arr, 8, &len);
+    CHECK("get_int_array missing", r < 0);
+
+    /* 5. Malformed non-array */
+    r = json_get_int_array("{\"channels\":\"1,2,3\"}", "channels", arr, 8, &len);
+    CHECK("get_int_array not an array", r < 0);
+}
+
 void run_json_tests(void)
 {
     printf("=== JSON Parser Tests ===\n");
     test_json_get_str();
     test_json_get_int();
+    test_json_get_int_array();
     test_json_field_exists();
     test_real_commands();
 }
