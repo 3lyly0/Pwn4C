@@ -260,6 +260,44 @@ This method bypasses all software-level recovery mechanisms.
 
 ---
 
+## Upgrading an Existing Drone (Pwn4C OS → newer Pwn4C OS)
+
+Once the router runs Pwn4C OS you no longer need `infect`; use OpenWrt's own
+`sysupgrade` over SSH. This keeps `/etc/config/*`, the SSH host keys and the
+provisioning marker (`/etc/pwn4c.initialized`, listed in
+`/etc/sysupgrade.conf`), so your LAN settings and the daemon survive.
+
+```bash
+# Host: connect to the drone's LAN port and give yourself an address
+sudo ip addr add 192.168.4.10/24 dev eth0   # or use DHCP from the drone
+
+scp pwn4c-firmware-mi4c-sysupgrade.bin root@192.168.4.1:/tmp/
+ssh root@192.168.4.1 'sysupgrade -v /tmp/pwn4c-firmware-mi4c-sysupgrade.bin'
+```
+
+On Windows use `scp`/`ssh` from the built-in OpenSSH client:
+
+```powershell
+scp .\pwn4c-firmware-mi4c-sysupgrade.bin root@192.168.4.1:/tmp/
+ssh root@192.168.4.1 "sysupgrade -v /tmp/pwn4c-firmware-mi4c-sysupgrade.bin"
+```
+
+The SSH session drops as soon as the image is written. Wait 60–90 s, then:
+
+```bash
+pwn4c discover        # expect 192.168.4.1
+ssh root@192.168.4.1 'uci get network.lan.ipaddr; ls /etc/rc.d/S95pwn4cd'
+```
+
+Use `sysupgrade -n` instead if you want a factory-fresh drone (drops all
+configuration; the built-in provisioning re-creates the Pwn4C defaults).
+
+> If the upgrade is rejected with `Device ... not supported` or
+> `Image metadata not found`, the file is not a sysupgrade image for this
+> board — rebuild it with `firmware/build.sh`.
+
+---
+
 ## Verification
 
 After flashing (via either Path A or Path B), verify the Drone is operational.
