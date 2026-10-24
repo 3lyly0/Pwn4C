@@ -219,7 +219,7 @@ See [api_reference.md](api_reference.md#udp-frame-stream-format) for byte-level 
 │          ┌───────▼────────┐        ┌───────▼──────┐ │
 │          │  Command       │        │  Capture     │ │
 │          │  Executor      │        │  Ring Buffer │ │
-│          │                │        │  (64KB)      │ │
+│          │                │        │  (512KB)      │ │
 │          └───────┬────────┘        └───────┬──────┘ │
 │                  │                         │        │
 │          ┌───────▼─────────────────────────▼──────┐ │
@@ -240,9 +240,9 @@ See [api_reference.md](api_reference.md#udp-frame-stream-format) for byte-level 
 
 **Control Handler**: Binds `SOCK_STREAM` on `0.0.0.0:4444`. Accepts exactly one TCP connection at a time (subsequent connections are refused). Reads newline-delimited JSON commands, dispatches to the Command Executor, writes back responses. If the connection drops, monitor mode and injection halt, and the daemon returns to idle.
 
-**Command Executor**: Translates abstract commands into concrete wireless interface operations. `START_MONITOR` configures the `ra0` interface into monitor mode via `iw`. `SET_CHANNEL` issues a channel-switch command. `SEND_INJECTION` opens a raw packet socket and transmits the provided frame bytes. All operations are synchronous.
+**Command Executor**: Translates abstract commands into concrete wireless interface operations. `START_MONITOR` configures the `wlan0` interface into monitor mode via `iw`. `SET_CHANNEL` issues a channel-switch command. `SEND_INJECTION` opens a raw packet socket and transmits the provided frame bytes. All operations are synchronous.
 
-**Capture Ring Buffer**: Fixed 64KB circular buffer in user-space. The wireless interface (in monitor mode) delivers frames via a raw socket. The ring buffer absorbs burst traffic and feeds the Frame Streamer. When full, oldest frames are silently dropped and a `BUFFER_OVERFLOW` event is pushed to the control channel.
+**Capture Ring Buffer**: Fixed 512KB circular buffer in user-space. The wireless interface (in monitor mode) delivers frames via a raw socket. The ring buffer absorbs burst traffic and feeds the Frame Streamer. When full, oldest frames are silently dropped and a `BUFFER_OVERFLOW` event is pushed to the control channel.
 
 **Frame Streamer**: Reads frames from the ring buffer, prepends the 16-byte stream header, sends UDP datagrams to the Host's IP (learned from the TCP connection's peer address). Fragmentation logic splits frames exceeding 1472 bytes (1500 MTU minus 20 IP minus 8 UDP overhead).
 
