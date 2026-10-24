@@ -585,6 +585,8 @@ static void cmd_send_injection(daemon_t *d, const char *id, const char *params)
 
     if (count < 1)  { count = 1; }
     if (count > 256) { count = 256; }  /* sanity cap */
+    if (interval_ms < 0)     { interval_ms = 0; }
+    if (interval_ms > 60000) { interval_ms = 60000; }
 
     /* Open TX socket lazily */
     if (!d->mock_mode && tx_open(d) < 0) {
@@ -594,6 +596,12 @@ static void cmd_send_injection(daemon_t *d, const char *id, const char *params)
     }
 
     d->state = STATE_INJECTING;
+
+    /* §3.5.7: pace a new burst; an in-flight burst keeps its original pacing */
+    if (d->tx_q.count == 0) {
+        d->tx_q.interval_ms = (uint32_t)interval_ms;
+        d->tx_q.next_tx_ms  = util_monotonic_ms();
+    }
 
     /* Enqueue frames into non-blocking TX ring (§3.3) */
     for (i = 0; i < count; i++) {
@@ -611,13 +619,15 @@ static void cmd_send_injection(daemon_t *d, const char *id, const char *params)
         queued++;
     }
 
-    /* Immediate opportunistic non-blocking drain */
-    while (d->tx_q.count > 0) {
-        int dr = tx_queue_drain_step(d);
-        if (dr > 0) {
-            sent++;
-        } else {
-            break; /* socket buffer full or empty; remainder drained in select loop */
+    /* Immediate opportunistic non-blocking drain (unpaced bursts only) */
+    if (d->tx_q.interval_ms == 0) {
+        while (d->tx_q.count > 0) {
+            int dr = tx_queue_drain_step(d);
+            if (dr > 0) {
+                sent++;
+            } else {
+                break; /* socket buffer full or empty; remainder drained in select loop */
+            }
         }
     }
 

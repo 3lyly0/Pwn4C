@@ -209,8 +209,12 @@ int main(int argc, char *argv[])
             if (g_daemon.pkt_fd > maxfd) { maxfd = g_daemon.pkt_fd; }
         }
 
-        /* If frames are pending in TX injection queue, monitor write readiness (§3.3) */
-        if (monitoring && g_daemon.tx_q.count > 0 && g_daemon.tx_fd >= 0 && !g_daemon.mock_mode) {
+        /* If frames are pending in TX injection queue and are not paced,
+         * monitor write readiness (§3.3).  Paced queues are driven by the
+         * select() timeout below instead of busy-spinning on a writable fd. */
+        if (monitoring && g_daemon.tx_q.count > 0
+         && g_daemon.tx_q.interval_ms == 0
+         && g_daemon.tx_fd >= 0 && !g_daemon.mock_mode) {
             FD_SET(g_daemon.tx_fd, &wfds);
             if (g_daemon.tx_fd > maxfd) { maxfd = g_daemon.tx_fd; }
         }
@@ -235,9 +239,24 @@ int main(int argc, char *argv[])
                 tv.tv_usec = hop_usec;
             }
         }
+        /* §3.5.7: wake up in time for the next paced injection frame */
+        if (monitoring && g_daemon.tx_q.count > 0
+         && g_daemon.tx_q.interval_ms > 0) {
+            int64_t now_ms = util_monotonic_ms();
+            int64_t diff_ms = g_daemon.tx_q.next_tx_ms - now_ms;
+            long    tx_usec;
+
+            if (diff_ms < 1) { diff_ms = 1; }
+            tx_usec = (long)(diff_ms * 1000LL);
+            if (tx_usec < tv.tv_usec) {
+                tv.tv_usec = tx_usec;
+            }
+        }
         {
             struct timeval *tvp = (monitoring || g_daemon.hop_enabled) ? &tv : NULL;
-            fd_set *wset = (monitoring && g_daemon.tx_q.count > 0 && g_daemon.tx_fd >= 0 && !g_daemon.mock_mode) ? &wfds : NULL;
+            fd_set *wset = (monitoring && g_daemon.tx_q.count > 0
+                         && g_daemon.tx_q.interval_ms == 0
+                         && g_daemon.tx_fd >= 0 && !g_daemon.mock_mode) ? &wfds : NULL;
 
             r = select(maxfd + 1, &rfds, wset, NULL, tvp);
         }
@@ -275,14 +294,30 @@ int main(int argc, char *argv[])
             (void)ctrl_recv(&g_daemon);
         }
 
-        /* ── Non-blocking TX frame injection drain (§3.3) ─────────────── */
+        /* ── Non-blocking TX frame injection drain (§3.3, §3.5.7) ─────── */
         if (monitoring && g_daemon.tx_q.count > 0) {
-            if (g_daemon.mock_mode || (g_daemon.tx_fd >= 0 && FD_ISSET(g_daemon.tx_fd, &wfds))) {
+            if (g_daemon.tx_q.interval_ms > 0) {
+                /* Paced mode: transmit at most one frame per interval. */
+                int64_t now_ms = util_monotonic_ms();
+                if (now_ms >= g_daemon.tx_q.next_tx_ms) {
+                    (void)tx_queue_drain_step(&g_daemon);
+                    g_daemon.tx_q.next_tx_ms =
+                        now_ms + (int64_t)g_daemon.tx_q.interval_ms;
+                }
+            } else if (g_daemon.mock_mode
+                    || (g_daemon.tx_fd >= 0
+                     && FD_ISSET(g_daemon.tx_fd, &wfds))) {
                 int tx_limit = 16;
                 while (tx_limit-- > 0 && g_daemon.tx_q.count > 0) {
                     int dr = tx_queue_drain_step(&g_daemon);
                     if (dr <= 0) { break; }
                 }
+            }
+
+            /* Pacing is a property of the current burst; clear it when idle. */
+            if (g_daemon.tx_q.count == 0) {
+                g_daemon.tx_q.interval_ms = 0;
+                g_daemon.tx_q.next_tx_ms  = 0;
             }
         }
 
@@ -351,6 +386,7 @@ int main(int argc, char *argv[])
     if (g_daemon.disc_fd >= 0)        { close(g_daemon.disc_fd); }
     if (g_daemon.stream_fd >= 0)      { close(g_daemon.stream_fd); }
     if (g_daemon.tx_fd >= 0)          { close(g_daemon.tx_fd); }
+    radio_netlink_close(&g_daemon);
 
     util_log("main", "pwn4cd stopped cleanly");
     closelog();

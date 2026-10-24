@@ -115,6 +115,8 @@ typedef struct {
     uint32_t  head;
     uint32_t  tail;
     uint32_t  count;
+    uint32_t  interval_ms;   /* inter-frame pacing; 0 = drain immediately  */
+    int64_t   next_tx_ms;    /* monotonic ms of next permitted transmission */
 } tx_queue_t;
 
 /* ── Daemon global state ──────────────────────────────────────────────────── */
