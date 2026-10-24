@@ -673,7 +673,7 @@ Each UDP datagram contains exactly one captured frame (or one fragment of a larg
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |       Fragment Index          |       Fragment Count          |  Bytes 8-11
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|       Frame Length            |          Reserved             |  Bytes 12-15
+|       Frame Length            |    Timestamp Hi16 (48-bit ts)  |  Bytes 12-15
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                                                               |
 |              Payload: RadioTap Header + 802.11 Frame          |
@@ -687,11 +687,11 @@ Each UDP datagram contains exactly one captured frame (or one fragment of a larg
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
 | 0 | 4 bytes | `sequence_number` | Monotonically increasing 32-bit counter. Wraps at 2^32. Used for drop detection. |
-| 4 | 4 bytes | `timestamp_us` | Microseconds since `START_MONITOR`. Wraps at ~71.6 minutes. |
+| 4 | 4 bytes | `timestamp_lo32` | Lower 32 bits of a 48-bit µs timestamp since `START_MONITOR`. Combine with `timestamp_hi16` (bytes 14-15) for full 48-bit precision. |
 | 8 | 2 bytes | `fragment_index` | 0-based fragment index. `0` for unfragmented frames. |
 | 10 | 2 bytes | `fragment_count` | Total fragments for this frame. `1` for unfragmented frames. |
 | 12 | 2 bytes | `frame_length` | Total reassembled frame length in bytes (not fragment payload length). |
-| 14 | 2 bytes | `reserved` | Must be zero. Reserved for future use. |
+| 14 | 2 bytes | `timestamp_hi16` | Upper 16 bits of the 48-bit µs timestamp (bytes 14-15). Combined with `timestamp_lo32` (bytes 4-7) to form a 48-bit µs counter: `(timestamp_hi16 << 32) | timestamp_lo32`. No rollover for ~8.9 years. |
 
 ### Fragmentation
 

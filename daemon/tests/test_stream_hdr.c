@@ -178,6 +178,49 @@ static void test_seq_wrap(void)
     CHECK("seq wrap 0xFFFFFFFF+1", seq == 0x00000000u);
 }
 
+static void test_48bit_timestamp(void)
+{
+    /* §2.2: Verify 48-bit timestamp encoding across the lo32/hi16 boundary */
+    uint8_t hdr[16];
+    uint32_t seq     = 0x00000001u;
+    uint32_t ts_lo   = 0xFFFFFFFFu;   /* lower 32 bits */
+    uint16_t fidx    = 0;
+    uint16_t fcnt    = 1;
+    uint16_t flen    = 100;
+    uint16_t ts_hi   = 0x0001u;       /* upper 16 bits: total elapsed = 0x1_FFFFFFFF µs */
+
+    memset(hdr, 0, sizeof(hdr));
+    put_u32_be(hdr + 0,  seq);
+    put_u32_be(hdr + 4,  ts_lo);
+    put_u16_be(hdr + 8,  fidx);
+    put_u16_be(hdr + 10, fcnt);
+    put_u16_be(hdr + 12, flen);
+    put_u16_be(hdr + 14, ts_hi);
+
+    /* Verify timestamp_lo32 */
+    CHECK("ts48 lo[0]", hdr[4] == 0xFF);
+    CHECK("ts48 lo[1]", hdr[5] == 0xFF);
+    CHECK("ts48 lo[2]", hdr[6] == 0xFF);
+    CHECK("ts48 lo[3]", hdr[7] == 0xFF);
+
+    /* Verify timestamp_hi16 at bytes 14-15 */
+    CHECK("ts48 hi[0]", hdr[14] == 0x00);
+    CHECK("ts48 hi[1]", hdr[15] == 0x01);
+
+    /* Verify reconstruction: (hi16 << 32) | lo32 = 0x1_FFFFFFFF */
+    {
+        uint64_t ts48 = ((uint64_t)ts_hi << 32) | (uint64_t)ts_lo;
+        CHECK("ts48 reconstruct", ts48 == 0x00001FFFFFFFFu);
+    }
+
+    /* Zero timestamp */
+    memset(hdr, 0, sizeof(hdr));
+    put_u32_be(hdr + 4, 0);
+    put_u16_be(hdr + 14, 0);
+    CHECK("ts48 zero lo", hdr[4]==0 && hdr[5]==0 && hdr[6]==0 && hdr[7]==0);
+    CHECK("ts48 zero hi", hdr[14]==0 && hdr[15]==0);
+}
+
 void run_stream_tests(void)
 {
     printf("=== Stream Header Tests ===\n");
@@ -186,6 +229,7 @@ void run_stream_tests(void)
     test_stream_header();
     test_frag_count();
     test_seq_wrap();
+    test_48bit_timestamp();
 }
 
 #ifndef TEST_COMBINED

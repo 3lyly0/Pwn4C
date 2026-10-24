@@ -11,11 +11,11 @@ import (
 
 // Stream Header: 16 bytes big-endian
 // u32 seq
-// u32 timestamp_us
+// u32 timestamp_lo32   (lower 32 bits of 48-bit µs since START_MONITOR)
 // u16 frag_idx
 // u16 frag_count
 // u16 frame_len
-// u16 reserved
+// u16 timestamp_hi16   (upper 16 bits of 48-bit µs since START_MONITOR)
 const (
 	StreamHeaderLen        = 16
 	PCAPMagicMicro         = 0xa1b2c3d4 // PCAP standard magic number
@@ -87,11 +87,12 @@ func (w *PCAPWriter) Close() error {
 
 // FrameReceiver manages the UDP 5555 stream and defragmentation
 type FrameReceiver struct {
-	conn       *net.UDPConn
-	pcapWriter *PCAPWriter
-	closeCh    chan struct{}
-	stopped    bool
-	mu         sync.Mutex
+	conn         *net.UDPConn
+	pcapWriter   *PCAPWriter
+	closeCh      chan struct{}
+	stopped      bool
+	mu           sync.Mutex
+	captureStart time.Time // set on first packet for timestamp reconstruction
 }
 
 // StartStreamReceiver opens UDP listener on streamPort and captures frames
@@ -159,11 +160,14 @@ func (r *FrameReceiver) readLoop(onFrame func(seq uint32, frame []byte)) {
 			continue
 		}
 
-		seq := binary.BigEndian.Uint32(buf[0:4])
-		// tsUS := binary.BigEndian.Uint32(buf[4:8])
-		fragIdx := binary.BigEndian.Uint16(buf[8:10])
+		seq       := binary.BigEndian.Uint32(buf[0:4])
+		tsLo32    := binary.BigEndian.Uint32(buf[4:8])
+		fragIdx   := binary.BigEndian.Uint16(buf[8:10])
 		fragCount := binary.BigEndian.Uint16(buf[10:12])
-		frameLen := binary.BigEndian.Uint16(buf[12:14])
+		frameLen  := binary.BigEndian.Uint16(buf[12:14])
+		tsHi16    := binary.BigEndian.Uint16(buf[14:16])
+		// Reconstruct 48-bit µs timestamp
+		tsUS48 := (uint64(tsHi16) << 32) | uint64(tsLo32)
 		payload := buf[StreamHeaderLen:n]
 
 		var fullFrame []byte
@@ -186,9 +190,16 @@ func (r *FrameReceiver) readLoop(onFrame func(seq uint32, frame []byte)) {
 			}
 		}
 
-		now := time.Now()
+		// §2.2: Reconstruct PCAP timestamp from 48-bit µs stream timestamp
+		r.mu.Lock()
+		if r.captureStart.IsZero() {
+			r.captureStart = time.Now()
+		}
+		pcapTime := r.captureStart.Add(time.Duration(tsUS48) * time.Microsecond)
+		r.mu.Unlock()
+
 		if r.pcapWriter != nil {
-			_ = r.pcapWriter.WriteFrame(fullFrame, now)
+			_ = r.pcapWriter.WriteFrame(fullFrame, pcapTime)
 		}
 
 		if onFrame != nil {
