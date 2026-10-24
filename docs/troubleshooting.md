@@ -176,6 +176,14 @@ host listener.
    the firmware is probably patched. Downgrade to a vulnerable build or use
    Path B.
 
+> **Payload detail (CVE-2019-18370):** the stock speedtest collects every
+> `<item url="..."/>` entry from `speedtest_urls.xml`, then picks `cfg.nc`
+> random entries (10 on `LESSMEM` builds, 15 otherwise). If the list holds
+> fewer entries than `cfg.nc`, it executes **nothing at all** — the log still
+> shows `download using /tmp/speedtest_urls.xml...`, which makes this look like
+> a network or firewall problem. Pwn4C repeats the injection 15 times so that
+> any random subset the router picks still triggers it.
+
 ### `busybox` / `telnetd` / SSH are not used by the primary flash path
 
 The primary `--flash` path does not need BusyBox, dropbear, telnetd, or an
