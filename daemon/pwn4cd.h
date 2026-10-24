@@ -101,6 +101,22 @@ typedef struct __attribute__((packed)) {
     uint16_t _pad;
 } slot_hdr_t;
 
+/* ── Non-blocking TX Injection Queue (§3.3) ───────────────────────────────── */
+#define TX_QUEUE_MAX        64u
+
+typedef struct {
+    uint8_t  frame[FRAME_SLOT_MAX];
+    uint16_t len;
+    uint8_t  retries;
+} tx_slot_t;
+
+typedef struct {
+    tx_slot_t slots[TX_QUEUE_MAX];
+    uint32_t  head;
+    uint32_t  tail;
+    uint32_t  count;
+} tx_queue_t;
+
 /* ── Daemon global state ──────────────────────────────────────────────────── */
 typedef struct {
     /* Identity */
@@ -126,6 +142,10 @@ typedef struct {
     int          ctrl_client_fd;        /* TCP accepted client (-1 = none)    */
     int          stream_fd;             /* UDP tx socket for :5555            */
     int          pkt_fd;                /* AF_PACKET raw capture socket (-1)  */
+    int          tx_fd;                 /* AF_PACKET injection socket (-1)    */
+
+    /* Non-blocking frame injection queue (§3.3) */
+    tx_queue_t   tx_q;
 
     /* Peer address (filled from TCP connect, used for stream UDP target)     */
     uint32_t     host_ip;               /* network byte order                 */
@@ -213,6 +233,7 @@ int     ctrl_accept(daemon_t *d);
 int     ctrl_handle_line(daemon_t *d, const char *line);
 void    ctrl_send(daemon_t *d, const char *json_line);
 void    ctrl_close_client(daemon_t *d);
+int     tx_queue_drain_step(daemon_t *d);
 
 /* discovery.c */
 int     disc_setup(daemon_t *d);
