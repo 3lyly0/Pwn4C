@@ -15,7 +15,7 @@ Pwn4C converts a stock Xiaomi Mi Router 4C (MediaTek MT7628N, ~$15 USD) into a h
 
 ## Features
 
-- **Zero-Touch Air-Gapped Deployment (`pwn4c infect`)**: Exploits stock firmware Web API authentication & command injection to enable root access and optionally flash custom OpenWrt firmware (`--flash`) over LAN with zero internet, serial, or TFTP intervention.
+- **Zero-Touch Air-Gapped Deployment (`pwn4c infect`)**: Exploits stock firmware Web API authentication & command injection to enable root access and optionally flash custom OpenWrt firmware (`--flash`) over LAN with zero internet, serial, or TFTP intervention. BusyBox is embedded in the uploaded payload, so the router needs no internet access and the host needs no inbound callback port for the root-shell stage.
 - **Dual-Port Architecture & HMAC-SHA256 Security**: Dedicated TCP control channel (port 4444) with optional pre-shared key (`--psk`) challenge-response authentication carries structured JSON telemetry and commands; high-throughput UDP channel (port 5555) streams raw 802.11 frames (RadioTap/PCAP) with 48-bit monotonic timestamps and indexed fragment reassembly.
 - **Zero-Conf Autodiscovery (`pwn4c discover`)**: Drone implants respond to discovery beacons over UDP 4440; host CLI automatically detects all reachable drones on the subnet without manual IP configuration.
 - **Autonomous Daemon-Side Channel Hopping (`pwn4c hop` / `pwn4c monitor --hop`)**: Sweeps across 2.4 GHz channels (1–13) directly inside the C daemon's `select()` timer loop using native `nl80211` Generic Netlink (`<2ms` switch latency) with zero TCP polling overhead.
@@ -62,6 +62,12 @@ pwn4c infect 192.168.31.1
 # Or infect and automatically flash Pwn4C OpenWrt image:
 pwn4c infect 192.168.31.1 --flash firmware/output/pwn4c-firmware-mi4c-sysupgrade.bin
 ```
+
+The payload tarball contains a vendored `busybox-mipsel` binary, so the router
+does not need internet access and the host does not need an inbound firewall
+rule for the telnet/SSH stage. `--flash` additionally starts a temporary local
+TCP server to deliver the sysupgrade image. See
+[installation.md](docs/installation.md#a2-run-the-infect-command) for details.
 
 ### 3. Discover Active Drone
 
