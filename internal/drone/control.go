@@ -2,9 +2,11 @@ package drone
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +18,18 @@ type ControlClient struct {
 	reader *bufio.Reader
 	mu     sync.Mutex
 	msgSeq int
+
+	// OnEvent, when set, receives unsolicited daemon events (e.g.
+	// BUFFER_OVERFLOW). When nil they are logged to stderr.
+	OnEvent func(AsyncEvent)
+}
+
+// AsyncEvent is an unsolicited newline-delimited JSON event pushed by the
+// daemon on the control channel (identifiable by a non-empty "event" field
+// and a null "id").
+type AsyncEvent struct {
+	Event string          `json:"event"`
+	Data  json.RawMessage `json:"data"`
 }
 
 // CommandRequest represents an outgoing JSON command
@@ -123,18 +137,57 @@ func (c *ControlClient) SendCommand(cmd string, params map[string]interface{}) (
 		return nil, fmt.Errorf("write command: %w", err)
 	}
 
-	// Read line response
-	line, err := c.reader.ReadBytes('\n')
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
+	// Read lines until the response matching req.ID arrives. The daemon may
+	// interleave unsolicited events (e.g. BUFFER_OVERFLOW) with command
+	// replies; those must be consumed and skipped rather than mistaken for
+	// the reply, which would desynchronize the stream by one message.
+	for {
+		line, err := c.reader.ReadBytes('\n')
+		if err != nil {
+			return nil, fmt.Errorf("read response: %w", err)
+		}
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
 
-	var resp BaseResponse
-	if err := json.Unmarshal(line, &resp); err != nil {
-		return nil, fmt.Errorf("unmarshal response (%s): %w", string(line), err)
-	}
+		var envelope struct {
+			ID     json.RawMessage `json:"id"`
+			Event  string          `json:"event"`
+			Status string          `json:"status"`
+		}
+		if err := json.Unmarshal(line, &envelope); err != nil {
+			return nil, fmt.Errorf("unmarshal response (%s): %w", string(line), err)
+		}
 
-	return &resp, nil
+		if envelope.Event != "" {
+			var ev AsyncEvent
+			if err := json.Unmarshal(line, &ev); err == nil {
+				if c.OnEvent != nil {
+					c.OnEvent(ev)
+				} else {
+					fmt.Fprintf(os.Stderr, "[drone] event %s: %s\n",
+						ev.Event, string(ev.Data))
+				}
+			}
+			continue
+		}
+
+		// Not a command response (no status): skip defensively.
+		if envelope.Status == "" {
+			continue
+		}
+
+		var resp BaseResponse
+		if err := json.Unmarshal(line, &resp); err != nil {
+			return nil, fmt.Errorf("unmarshal response (%s): %w", string(line), err)
+		}
+		if resp.ID != req.ID {
+			// Stale reply for an earlier request; keep waiting for ours.
+			continue
+		}
+		return &resp, nil
+	}
 }
 
 // GetStatus queries current drone telemetry
