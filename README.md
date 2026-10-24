@@ -15,7 +15,7 @@ Pwn4C converts a stock Xiaomi Mi Router 4C (MediaTek MT7628N, ~$15 USD) into a h
 
 ## Features
 
-- **Zero-Touch Air-Gapped Deployment (`pwn4c infect`)**: Exploits stock firmware Web API authentication & command injection to enable root access and optionally flash custom OpenWrt firmware (`--flash`) over LAN with zero internet, serial, or TFTP intervention. BusyBox is embedded in the uploaded payload, so the router needs no internet access and the host needs no inbound callback port for the root-shell stage.
+- **Zero-Touch Air-Gapped Deployment (`pwn4c infect`)**: Exploits stock firmware Web API authentication & command injection to directly flash custom OpenWrt firmware (`--flash`) over LAN with zero internet, serial, or TFTP intervention. The uploaded payload is only XML + script (a few KB); the router pulls the sysupgrade image from the host and writes it to OS1. No BusyBox, dropbear, or telnet/SSH shell is required for the primary path.
 - **Dual-Port Architecture & HMAC-SHA256 Security**: Dedicated TCP control channel (port 4444) with optional pre-shared key (`--psk`) challenge-response authentication carries structured JSON telemetry and commands; high-throughput UDP channel (port 5555) streams raw 802.11 frames (RadioTap/PCAP) with 48-bit monotonic timestamps and indexed fragment reassembly.
 - **Zero-Conf Autodiscovery (`pwn4c discover`)**: Drone implants respond to discovery beacons over UDP 4440; host CLI automatically detects all reachable drones on the subnet without manual IP configuration.
 - **Autonomous Daemon-Side Channel Hopping (`pwn4c hop` / `pwn4c monitor --hop`)**: Sweeps across 2.4 GHz channels (1–13) directly inside the C daemon's `select()` timer loop using native `nl80211` Generic Netlink (`<2ms` switch latency) with zero TCP polling overhead.
@@ -30,7 +30,7 @@ Pwn4C converts a stock Xiaomi Mi Router 4C (MediaTek MT7628N, ~$15 USD) into a h
 
 | Command | Syntax / Example | Description |
 |---|---|---|
-| `infect` | `pwn4c infect 192.168.31.1 [-f sysupgrade.bin]` | Exploits stock Xiaomi firmware (air-gapped) and optionally flashes Pwn4C OS |
+| `infect` | `pwn4c infect 192.168.31.1 -f sysupgrade.bin` | Exploits stock Xiaomi firmware and directly flashes Pwn4C OS (air-gapped) |
 | `discover` | `pwn4c discover [-t 3]` | Scans subnet for active Pwn4C drone implants via UDP broadcast |
 | `status` | `pwn4c status [target_ip] [--psk secret]` | Queries live telemetry, drop counters, and radio state over TCP |
 | `monitor` | `pwn4c monitor [target_ip] -c 6 -o capture.pcap [--hop]` | Starts 802.11 monitor mode, optional BPF filter/hopper, and streams PCAP |
@@ -58,15 +58,22 @@ sudo cp pwn4c /usr/local/bin/   # On Linux/macOS
 Connect your host PC to the router's LAN port:
 
 ```bash
-pwn4c infect 192.168.31.1
-# Or infect and automatically flash Pwn4C OpenWrt image:
 pwn4c infect 192.168.31.1 --flash firmware/output/pwn4c-firmware-mi4c-sysupgrade.bin
 ```
 
-The payload tarball contains a vendored `busybox-mipsel` binary, so the router
-does not need internet access and the host does not need an inbound firewall
-rule for the telnet/SSH stage. `--flash` additionally starts a temporary local
-TCP server to deliver the sysupgrade image. See
+This is the primary deployment path. The router needs no internet access: the
+uploaded payload is only `speedtest_urls.xml` + `script.sh`, and the injected
+script pulls the sysupgrade image from a temporary host TCP server, runs
+`mtd -r write /tmp/pwn4c.bin OS1`, and reboots into Pwn4C OS on
+`192.168.4.1`.
+
+On Windows, allow `pwn4c.exe` inbound TCP on the **Private** network when the
+firewall prompt appears (or allow the random firmware port printed by the CLI).
+After the flash transfer completes, wait 60–90 seconds, reconnect to
+`192.168.4.0/24` (DHCP or static), and run `pwn4c discover`.
+
+Running `pwn4c infect 192.168.31.1` without `--flash` is only a secondary
+stock-firmware debug path; it does not deploy the implant. See
 [installation.md](docs/installation.md#a2-run-the-infect-command) for details.
 
 ### 3. Discover Active Drone
