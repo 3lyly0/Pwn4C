@@ -384,5 +384,3 @@ func (c *ControlClient) SetFilter(mgmtOnly bool, bssid string) error {
 	}
 	return nil
 }
-
-
