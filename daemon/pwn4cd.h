@@ -19,12 +19,13 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <sys/types.h>
+#include <linux/filter.h>
 
 /* ── Build-time constants ─────────────────────────────────────────────────── */
 /* DAEMON_VERSION comes from the build (Makefile VERSION, default: git
  * describe). Keep the fallback for direct cc invocations. */
 #ifndef DAEMON_VERSION
-#define DAEMON_VERSION      "0.1.0"
+#define DAEMON_VERSION      "1.0.0"
 #endif
 #define DAEMON_HARDWARE     "mi4c-mt7628n"
 #define DAEMON_CHIPSET      "MT7628N"
@@ -56,6 +57,9 @@
  * `iw dev` shows wlan0; ra0 is the old Ralink proprietary naming) */
 #define WLAN_IFACE_DEFAULT  "wlan0"
 #define ETH_IFACE_DEFAULT   "eth0"
+
+/* Default pre-shared key file path on OpenWrt rootfs (§4.1) */
+#define PSK_FILE_DEFAULT    "/etc/pwn4c.key"
 
 /* Max channels in the 2.4 GHz band */
 #define CHAN_MIN            1
@@ -101,7 +105,7 @@ typedef struct __attribute__((packed)) {
     uint16_t _pad;
 } slot_hdr_t;
 
-/* ── Non-blocking TX Injection Queue (§3.3) ───────────────────────────────── */
+/* ── Non-blocking TX Injection Queue (§3.3, §3.5.7) ───────────────────────── */
 #define TX_QUEUE_MAX        64u
 
 typedef struct {
@@ -123,7 +127,7 @@ typedef struct {
 typedef struct {
     /* Identity */
     char        drone_id[32];           /* "pwn4c-XXXX" derived from MAC     */
-    char        wlan_iface[16];         /* e.g. "ra0"                        */
+    char        wlan_iface[16];         /* e.g. "wlan0"                      */
     char        eth_iface[16];          /* e.g. "eth0"                       */
     uint8_t     base_mac[6];            /* read from /sys/class/net/.../address */
 
@@ -157,10 +161,21 @@ typedef struct {
     bool         filter_bssid_set;
     uint8_t      filter_bssid[6];
 
+    /* Control & Discovery Pre-Shared Key Authentication (§4.1) */
+    bool         psk_required;          /* true if --psk or /etc/pwn4c.key set*/
+    char         psk[128];              /* pre-shared key secret              */
+    bool         client_authed;         /* true if current TCP client authed  */
+    char         auth_nonce[33];        /* 32-hex-char per-connection nonce   */
+
+    /* Self-healing & dead-man failsafe (§4.2) */
+    int          idle_timeout_sec;      /* 0 = disabled; >0 = dead-man timer  */
+    int64_t      last_activity_sec;     /* monotonic sec of last ctrl activity*/
+    uint64_t     iface_recoveries;      /* count of self-healed ENETDOWN/DEV  */
+
     /* Peer address (filled from TCP connect, used for stream UDP target)     */
     uint32_t     host_ip;               /* network byte order                 */
 
-    /* Capture ring buffer (fixed, stack-allocated in main)                   */
+    /* Capture ring buffer (fixed, BSS-allocated in main)                     */
     uint8_t     *ring_buf;              /* pointer to 512KB static array      */
     uint32_t     ring_head;             /* write cursor                       */
     uint32_t     ring_tail;             /* read cursor                        */
@@ -216,6 +231,12 @@ int64_t util_monotonic_us(void);
 int     util_clock_gettime_sec(int64_t *sec, int32_t *nsec);
 void    util_sleep_ms(int ms);
 int     util_get_kernel_version(char *buf, size_t n);
+void    util_sha256(const uint8_t *data, size_t len, uint8_t out[32]);
+void    util_hmac_sha256(const uint8_t *key, size_t key_len,
+                         const uint8_t *data, size_t data_len,
+                         uint8_t out[32]);
+void    util_hmac_sha256_hex(const char *key, const char *msg, char out_hex[65]);
+int     util_random_hex(char *out, size_t hex_chars);
 
 /* radio.c */
 int     radio_set_down(daemon_t *d);
@@ -230,9 +251,13 @@ void    radio_netlink_close(daemon_t *d);
 /* capture.c */
 int     capture_open(daemon_t *d);
 void    capture_close(daemon_t *d);
-int     capture_read_frame(daemon_t *d);   /* returns 1=frame queued, 0=none, -1=err */
+int     capture_read_frame(daemon_t *d);   /* returns 1=frame, 0=none, -1=err, -2=ifdown */
 int     capture_get_kernel_drops(daemon_t *d, uint32_t *tp_drops_out);
+int     capture_build_bpf(bool mgmt_only, const uint8_t *bssid,
+                          struct sock_filter *insns, unsigned short max_insns,
+                          unsigned short *len_out);
 int     capture_set_filter(daemon_t *d, bool mgmt_only, const uint8_t *bssid);
+int     capture_recover_interface(daemon_t *d);
 
 /* stream.c */
 int     stream_open(daemon_t *d);

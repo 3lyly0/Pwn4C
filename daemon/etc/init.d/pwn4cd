@@ -11,10 +11,12 @@
 # This file is placed at /etc/init.d/pwn4cd on the rootfs.
 # Enable it via:
 #   /etc/init.d/pwn4cd enable
-# (adds rc.d symlink; do this in the uci-defaults script on first boot)
 #
-# The daemon binary lives at /usr/sbin/pwn4cd (installed by the firmware image).
-# No floating-point operations.  No libpcap.  No libnl.
+# Optional UCI options:
+#   uci set pwn4cd.daemon.iface=wlan0
+#   uci set pwn4cd.daemon.eth=eth0
+#   uci set pwn4cd.daemon.psk_file=/etc/pwn4c.key
+#   uci set pwn4cd.daemon.idle_timeout=0
 
 START=95
 STOP=10
@@ -23,11 +25,10 @@ USE_PROCD=1
 DAEMON=/usr/sbin/pwn4cd
 PIDFILE=/var/run/pwn4cd.pid
 
-# Wireless interface (OpenWrt mt76 naming: wlan0 — verified on-device).
-# Override via UCI option if needed:
-#   uci set pwn4cd.daemon.iface=wlan0
 IFACE=$(uci -q get pwn4cd.daemon.iface 2>/dev/null || echo "wlan0")
 ETH=$(uci  -q get pwn4cd.daemon.eth   2>/dev/null || echo "eth0")
+PSK_FILE=$(uci -q get pwn4cd.daemon.psk_file 2>/dev/null || echo "/etc/pwn4c.key")
+IDLE_TIMEOUT=$(uci -q get pwn4cd.daemon.idle_timeout 2>/dev/null || echo "0")
 
 start_service() {
     # Validate the daemon binary exists
@@ -36,10 +37,11 @@ start_service() {
         return 1
     }
 
-    logger -t pwn4cd "starting pwn4cd (iface=$IFACE eth=$ETH)"
+    logger -t pwn4cd "starting pwn4cd (iface=$IFACE eth=$ETH psk_file=$PSK_FILE idle_timeout=$IDLE_TIMEOUT)"
 
     procd_open_instance
-    procd_set_param command "$DAEMON" --iface "$IFACE" --eth "$ETH"
+    procd_set_param command "$DAEMON" --iface "$IFACE" --eth "$ETH" \
+        --psk-file "$PSK_FILE" --idle-timeout "$IDLE_TIMEOUT"
     procd_set_param respawn 3600 5 0   # threshold=1h, timeout=5s, max_fail=0 (always)
     procd_set_param stdout 1           # capture stdout to syslog
     procd_set_param stderr 1           # capture stderr to syslog

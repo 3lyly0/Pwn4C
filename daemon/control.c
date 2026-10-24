@@ -2,15 +2,12 @@
  * control.c — TCP control channel (port 4444): JSON command dispatcher.
  *
  * Single-client accept; newline-delimited JSON.
+ * Supports challenge-response HMAC-SHA256 authentication (§4.1):
+ *   - GET_CHALLENGE -> returns per-session 32-hex-char nonce
+ *   - AUTH          -> verifies HMAC-SHA256(psk, nonce)
  * All commands per api_reference.md implemented.
  * Unknown command -> INVALID_COMMAND, never crash.
  * Partial read handling: accumulate into line buffer until '\n'.
- *
- * Host IP is derived from the TCP peer address and stored in d->host_ip
- * for use by the stream UDP target.
- *
- * Injection: SEND_INJECTION command decodes hex frame, sends via AF_PACKET
- * with ENOBUFS -> 1ms x10 retry (hardware.md).
  */
 
 #include "pwn4cd.h"
@@ -134,7 +131,14 @@ int tx_queue_drain_step(daemon_t *d)
         return 0;
     }
 
-    /* Unrecoverable error */
+    /* Self-heal TX socket if interface bounced (§4.2) */
+    if (errno == ENETDOWN || errno == ENODEV || errno == ENXIO) {
+        close(d->tx_fd);
+        d->tx_fd = -1;
+        (void)tx_open(d);
+    }
+
+    /* Unrecoverable error for this slot */
     d->inject_failures++;
     d->tx_q.tail = (d->tx_q.tail + 1u) % TX_QUEUE_MAX;
     d->tx_q.count--;
@@ -196,11 +200,73 @@ static void send_error(daemon_t *d, const char *id,
     ctrl_send(d, buf);
 }
 
+/* ── Challenge-Response Authentication (§4.1) ─────────────────────────────── */
+
+static void cmd_get_challenge(daemon_t *d, const char *id)
+{
+    char data[128];
+
+    /* Regenerate fresh nonce on every challenge request */
+    if (util_random_hex(d->auth_nonce, 32) < 0) {
+        (void)snprintf(d->auth_nonce, sizeof(d->auth_nonce),
+                       "%016llx%016llx",
+                       (unsigned long long)util_monotonic_us(),
+                       (unsigned long long)d->frames_captured);
+    }
+
+    (void)snprintf(data, sizeof(data),
+        "{\"nonce\":\"%s\",\"auth_required\":%s}",
+        d->auth_nonce,
+        d->psk_required ? "true" : "false");
+    send_ok(d, id, data);
+}
+
+static void cmd_auth(daemon_t *d, const char *id, const char *params)
+{
+    char hmac_in[128];
+    char expected[65];
+    size_t i;
+    uint8_t diff = 0;
+
+    if (!d->psk_required) {
+        d->client_authed = true;
+        send_ok(d, id, "{\"authenticated\":true}");
+        return;
+    }
+
+    if (json_get_str(params, "hmac", hmac_in, sizeof(hmac_in)) < 0
+        || strlen(hmac_in) != 64u) {
+        send_error(d, id, "AUTH_FAILED", "Missing or invalid 64-char hex HMAC");
+        return;
+    }
+
+    util_hmac_sha256_hex(d->psk, d->auth_nonce, expected);
+
+    /* Constant-time case-insensitive hex comparison */
+    for (i = 0; i < 64u; i++) {
+        unsigned char a = (unsigned char)tolower((unsigned char)hmac_in[i]);
+        unsigned char b = (unsigned char)expected[i];
+        diff |= (uint8_t)(a ^ b);
+    }
+
+    /* Rotate nonce immediately to prevent replay */
+    (void)util_random_hex(d->auth_nonce, 32);
+
+    if (diff != 0) {
+        d->client_authed = false;
+        send_error(d, id, "AUTH_FAILED", "HMAC verification failed");
+        return;
+    }
+
+    d->client_authed = true;
+    send_ok(d, id, "{\"authenticated\":true}");
+}
+
 /* ── Command handlers ─────────────────────────────────────────────────────── */
 
 static void cmd_get_status(daemon_t *d, const char *id)
 {
-    char     data[768];
+    char     data[896];
     char     drone_id[32];
     int      cpu_temp = 0;
     int64_t  free_ram = 0;
@@ -231,7 +297,8 @@ static void cmd_get_status(daemon_t *d, const char *id)
         "\"tx_frames\":%llu,"
         "\"ring_overruns\":%llu,"
         "\"inject_failures\":%llu,"
-        "\"kernel_drops\":%lu"
+        "\"kernel_drops\":%lu,"
+        "\"iface_recoveries\":%llu"
         "}",
         d->state == STATE_MONITORING || d->state == STATE_INJECTING
             ? "monitor" : "idle",
@@ -249,7 +316,8 @@ static void cmd_get_status(daemon_t *d, const char *id)
         (unsigned long long)d->stream_seq,
         (unsigned long long)d->ring_overruns,
         (unsigned long long)d->inject_failures,
-        (unsigned long)kernel_drops
+        (unsigned long)kernel_drops,
+        (unsigned long long)d->iface_recoveries
     );
     send_ok(d, id, data);
 }
@@ -300,7 +368,7 @@ static void cmd_start_monitor(daemon_t *d, const char *id, const char *params)
     /* Open stream socket */
     if (stream_open(d) < 0) {
         d->hop_enabled = false;
-    capture_close(d);
+        capture_close(d);
         (void)radio_exit_monitor(d);
         send_error(d, id, "INTERFACE_ERROR",
                    "Failed to open stream socket");
@@ -363,7 +431,6 @@ static void cmd_stop_monitor(daemon_t *d, const char *id)
     tx_close(d);
 
     if (radio_exit_monitor(d) < 0) {
-        /* Log but still succeed — we've closed sockets */
         util_log("ctrl", "STOP_MONITOR: radio_exit_monitor partial failure");
     }
 
@@ -378,20 +445,13 @@ static void cmd_stop_monitor(daemon_t *d, const char *id)
     send_ok(d, id, data);
 }
 
-/*
- * RESTORE_NORMAL — one-command path back to regular networking.
- * Stops monitor/injection if active, then restores the managed/AP radio
- * (UCI profile is only re-enabled, never rewritten). This is the dual-use
- * escape hatch: the box is always recoverable to normal internet use
- * without serial access.
- */
 static void cmd_restore_normal(daemon_t *d, const char *id)
 {
     char data[64];
 
     if (d->state == STATE_MONITORING || d->state == STATE_INJECTING) {
         d->hop_enabled = false;
-    capture_close(d);
+        capture_close(d);
         stream_close(d);
         tx_close(d);
     }
@@ -440,7 +500,6 @@ static void cmd_set_channel(daemon_t *d, const char *id, const char *params)
     }
 
     t_after    = util_monotonic_us();
-    /* integer µs -> ms; max representable ~71 min so no overflow concern */
     elapsed_ms = (int)((t_after - t_before) / 1000LL);
     if (elapsed_ms < 0) { elapsed_ms = 0; }
 
@@ -692,7 +751,6 @@ static void cmd_set_mac(daemon_t *d, const char *id, const char *params)
         }
     } else {
         /* Random MAC (locally-administered bit set) */
-        /* Use /dev/urandom for randomness */
         int urfd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
         if (urfd < 0) {
             send_error(d, id, "INTERNAL_ERROR", "Cannot open /dev/urandom");
@@ -729,19 +787,16 @@ static void cmd_reboot(daemon_t *d, const char *id)
 {
     const char *data = "{\"message\":\"Rebooting in 2 seconds\"}";
     send_ok(d, id, data);
-    /* Flush */
     util_sleep_ms(2000);
-    /* Restore radio before reboot */
     if (d->state == STATE_MONITORING || d->state == STATE_INJECTING) {
         d->hop_enabled = false;
-    capture_close(d);
+        capture_close(d);
         stream_close(d);
         tx_close(d);
         (void)radio_exit_monitor(d);
     }
     util_log("ctrl", "REBOOT command — executing reboot");
     (void)util_run_cmd("reboot");
-    /* Should not reach here */
 }
 
 static void cmd_get_diagnostics(daemon_t *d, const char *id)
@@ -759,8 +814,6 @@ static void cmd_get_diagnostics(daemon_t *d, const char *id)
     util_cpu_temp(&cpu_temp);
     (void)snprintf(wlan_iface, sizeof(wlan_iface), "%s", d->wlan_iface);
 
-    /* load_average: we read /proc/loadavg as integers (×100 scale, no float) */
-    /* Format: "0.12 0.08 0.03 ..." — we parse as strings and re-emit raw     */
     {
         char lavg[64] = "0.00 0.00 0.00";
         (void)util_read_file("/proc/loadavg", lavg, sizeof(lavg));
@@ -826,7 +879,7 @@ int ctrl_setup(daemon_t *d)
         return -1;
     }
 
-    if (listen(fd, 1) < 0) {  /* backlog=1: single client */
+    if (listen(fd, 1) < 0) {
         util_log("ctrl", "listen: %s", strerror(errno));
         close(fd);
         return -1;
@@ -844,11 +897,10 @@ int ctrl_accept(daemon_t *d)
     int                cfd;
     int                flags;
     char               peerstr[INET_ADDRSTRLEN];
-    /* TCP keepalive tuning constants (per roadmap §1.2) */
     static const int   ka_on       = 1;
-    static const int   ka_idle     = 10;   /* seconds before first probe  */
-    static const int   ka_intvl    = 3;    /* seconds between probes      */
-    static const int   ka_cnt      = 3;    /* probes before declaring dead */
+    static const int   ka_idle     = 10;
+    static const int   ka_intvl    = 3;
+    static const int   ka_cnt      = 3;
 
     peerlen = sizeof(peer);
     do {
@@ -861,37 +913,34 @@ int ctrl_accept(daemon_t *d)
         return -1;
     }
 
-    /* ── 1.2: Replace a stale dead-peer connection instead of refusing ─── *
-     * If a previous client's TCP socket is still open (e.g. after SIGKILL  *
-     * or a network drop without FIN), the keepalive probes above will have  *
-     * eventually closed it.  If the slot is still occupied, close it now    *
-     * so the new connection can proceed, stopping any active monitor first. */
     if (d->ctrl_client_fd >= 0) {
         util_log("ctrl", "new connection displacing stale client (fd=%d)",
                  d->ctrl_client_fd);
         ctrl_close_client(d);
     }
 
-    /* Set non-blocking on client fd */
     flags = fcntl(cfd, F_GETFL, 0);
     if (flags >= 0) {
         (void)fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
     }
 
-    /* ── 1.2: Enable TCP keepalive to detect silent peer disappearance ─── */
     (void)setsockopt(cfd, SOL_SOCKET,  SO_KEEPALIVE,   &ka_on,    sizeof(ka_on));
     (void)setsockopt(cfd, IPPROTO_TCP, TCP_KEEPIDLE,   &ka_idle,  sizeof(ka_idle));
     (void)setsockopt(cfd, IPPROTO_TCP, TCP_KEEPINTVL,  &ka_intvl, sizeof(ka_intvl));
     (void)setsockopt(cfd, IPPROTO_TCP, TCP_KEEPCNT,    &ka_cnt,   sizeof(ka_cnt));
 
-    d->ctrl_client_fd = cfd;
-    d->host_ip        = peer.sin_addr.s_addr;  /* network byte order */
-    d->state          = STATE_CONNECTED;
+    d->ctrl_client_fd    = cfd;
+    d->host_ip           = peer.sin_addr.s_addr;
+    d->state             = STATE_CONNECTED;
+    d->client_authed     = !d->psk_required;
+    d->last_activity_sec = util_monotonic_sec();
+    (void)util_random_hex(d->auth_nonce, 32);
 
     if (inet_ntop(AF_INET, &peer.sin_addr, peerstr, sizeof(peerstr)) == NULL) {
         (void)snprintf(peerstr, sizeof(peerstr), "?.?.?.?");
     }
-    util_log("ctrl", "client connected from %s (fd=%d)", peerstr, cfd);
+    util_log("ctrl", "client connected from %s (fd=%d, auth_req=%s)",
+             peerstr, cfd, d->psk_required ? "yes" : "no");
 
     s_linelen = 0;
     return 1;
@@ -907,8 +956,9 @@ int ctrl_handle_line(daemon_t *d, const char *line)
     char params_buf[JSON_BUF_LEN];
     const char *params;
 
+    d->last_activity_sec = util_monotonic_sec();
+
     if (json_get_str(line, "command", cmd, sizeof(cmd)) < 0) {
-        /* Malformed — try to echo id if present */
         if (json_get_str(line, "id", id, sizeof(id)) < 0) {
             (void)snprintf(id, sizeof(id), "unknown");
         }
@@ -919,8 +969,7 @@ int ctrl_handle_line(daemon_t *d, const char *line)
     if (json_get_str(line, "id", id, sizeof(id)) < 0) {
         (void)snprintf(id, sizeof(id), "unknown");
     }
-    /* Sanitize id: it is echoed into JSON responses, so strip characters
-     * that would break framing (host-controlled input). */
+    /* Sanitize id */
     {
         size_t ri, wi;
         for (ri = 0, wi = 0; id[ri] != '\0'; ri++) {
@@ -937,7 +986,6 @@ int ctrl_handle_line(daemon_t *d, const char *line)
         params = strchr(params, '{');
     }
     if (params) {
-        /* Copy params substring to buffer */
         size_t plen = strlen(params);
         if (plen >= sizeof(params_buf)) { plen = sizeof(params_buf) - 1; }
         memcpy(params_buf, params, plen);
@@ -948,6 +996,22 @@ int ctrl_handle_line(daemon_t *d, const char *line)
     params = params_buf;
 
     util_log("ctrl", "cmd=%s id=%s", cmd, id);
+
+    /* Unauthenticated handshake commands (§4.1) */
+    if (strcmp(cmd, "GET_CHALLENGE") == 0) {
+        cmd_get_challenge(d, id);
+        return 0;
+    } else if (strcmp(cmd, "AUTH") == 0) {
+        cmd_auth(d, id, params);
+        return 0;
+    }
+
+    /* Enforce PSK authentication before privileged commands (§4.1) */
+    if (d->psk_required && !d->client_authed) {
+        send_error(d, id, "AUTH_REQUIRED",
+                   "Authentication required: call GET_CHALLENGE and AUTH first");
+        return 0;
+    }
 
     if (strcmp(cmd, "GET_STATUS") == 0) {
         cmd_get_status(d, id);
@@ -982,10 +1046,6 @@ int ctrl_handle_line(daemon_t *d, const char *line)
     return 0;
 }
 
-/*
- * ctrl_recv — Non-blocking read from client, accumulate into line buffer.
- * Returns 1 if a complete line was dispatched, 0 if more data needed, -1 err.
- */
 int ctrl_recv(daemon_t *d)
 {
     char   chunk[256];
@@ -1013,7 +1073,6 @@ int ctrl_recv(daemon_t *d)
     for (i = 0; i < (int)n; i++) {
         char c = chunk[i];
         if (c == '\n') {
-            /* Complete line */
             if (s_linelen > 0) {
                 s_linebuf[s_linelen] = '\0';
                 ctrl_handle_line(d, s_linebuf);
@@ -1023,7 +1082,6 @@ int ctrl_recv(daemon_t *d)
             if (s_linelen < (int)(JSON_BUF_LEN - 1)) {
                 s_linebuf[s_linelen++] = c;
             }
-            /* else: line too long — discard and reset on next \n */
         }
     }
     return 1;
@@ -1062,16 +1120,16 @@ void ctrl_close_client(daemon_t *d)
         close(d->ctrl_client_fd);
         d->ctrl_client_fd = -1;
     }
-    /* If monitor was active, stop it and restore radio */
     if (d->state == STATE_MONITORING || d->state == STATE_INJECTING) {
         d->hop_enabled = false;
-    capture_close(d);
+        capture_close(d);
         stream_close(d);
         tx_close(d);
         (void)radio_exit_monitor(d);
         util_log("ctrl", "client gone — monitor stopped, radio restored");
     }
-    d->state   = STATE_IDLE;
-    d->host_ip = 0;
-    s_linelen  = 0;
+    d->state         = STATE_IDLE;
+    d->client_authed = false;
+    d->host_ip       = 0;
+    s_linelen        = 0;
 }

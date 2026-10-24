@@ -90,7 +90,7 @@ test: $(TEST_BIN)
 
 $(TEST_BIN): $(TEST_SRCS) tests/run_tests.c json_parse.c util.c capture.c
 	@mkdir -p tests
-	$(CC_NATIVE) $(CFLAGS_NATIVE) -DTEST_COMBINED -I. -o $@ \
+	$(CC_NATIVE) $(CFLAGS_NATIVE) $(LDFLAGS_NATIVE) -DTEST_COMBINED -I. -o $@ \
 		$(TEST_SRCS) tests/run_tests.c json_parse.c util.c capture.c
 	@echo "[test] built: $@"
 

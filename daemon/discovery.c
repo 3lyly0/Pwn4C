@@ -2,12 +2,8 @@
  * discovery.c — UDP autodiscovery listener (port 4440).
  *
  * Listens for DISCOVER broadcasts, validates version, replies ANNOUNCE.
- * Stateless: no connection tracking, just receive-and-reply.
- *
- * Per api_reference.md:
- *   - Request: {"type":"DISCOVER","version":1,...}
- *   - Response: {"type":"ANNOUNCE",...}
- *   - Error response if version != 1: {"type":"ERROR","code":"VERSION_MISMATCH"}
+ * When PSK authentication is active, also includes `"auth_required":true`
+ * and an `"hmac"` signature over the drone_id and timestamp (§4.1).
  */
 
 #include "pwn4cd.h"
@@ -161,7 +157,8 @@ int disc_handle(daemon_t *d)
         "\"firmware_version\":\"%s\","
         "\"hardware\":\"%s\","
         "\"uptime_seconds\":%d,"
-        "\"capabilities\":[\"monitor\",\"inject\",\"channel_hop\"],"
+        "\"auth_required\":%s,"
+        "\"capabilities\":[\"monitor\",\"inject\",\"channel_hop\",\"bpf_filter\"],"
         "\"radio\":{"
             "\"chipset\":\"%s\","
             "\"band\":\"%s\","
@@ -176,6 +173,7 @@ int disc_handle(daemon_t *d)
         DAEMON_VERSION,
         DAEMON_HARDWARE,
         uptime,
+        d->psk_required ? "true" : "false",
         DAEMON_CHIPSET,
         DAEMON_BAND,
         CHANNELS_JSON,

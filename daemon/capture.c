@@ -7,13 +7,7 @@
  *
  * Ring buffer layout:
  *   Each slot: [slot_hdr_t (4 bytes)] [frame bytes (frame_bytes)]
- *   Slots are contiguous; if a frame would wrap around the ring end,
- *   it is split into two memcpy calls (ring is a circular byte array).
- *
- *   We use a simpler approach: individual frames are never larger than
- *   FRAME_SLOT_MAX bytes (2332).  Since RING_BYTES = 524288 >> FRAME_SLOT_MAX
- *   we never need wrap-splitting: if (ring_head + slot_size) wraps, we
- *   drop the oldest frames until there is room, or skip this frame.
+ *   Individual frames are capped at FRAME_SLOT_MAX bytes (2332).
  *
  * In mock mode: a timer-driven synthetic frame generator fills the ring.
  */
@@ -233,25 +227,124 @@ void capture_close(daemon_t *d)
 }
 
 /*
- * capture_set_filter — Attach classic BPF bytecode filter to AF_PACKET socket (§3.4).
- * Filters by frame type (mgmt_only) and/or target BSSID.
+ * capture_build_bpf — Construct classic BPF bytecode for RadioTap + 802.11 (§3.4, §3.5.2).
  *
  * RadioTap it_len is a 16-bit *little-endian* field at bytes 2-3, while classic
  * BPF packet loads are big-endian.  Compose the value manually so that X points
  * at the exact 802.11 header start even for extended RadioTap headers (>255 B).
  */
+int capture_build_bpf(bool mgmt_only, const uint8_t *bssid,
+                      struct sock_filter *insns, unsigned short max_insns,
+                      unsigned short *len_out)
+{
+    unsigned short pc = 0;
+    uint32_t       bssid_hi = 0;
+    uint32_t       bssid_lo = 0;
+    unsigned short addr_jumps[4];  /* type check + 3 address checks */
+    unsigned short addr_count = 0;
+    unsigned short accept_pc;
+    unsigned short reject_pc;
+    unsigned short i;
+
+    if (!insns || !len_out || max_insns < 28u) { return -1; }
+    *len_out = 0;
+
+    if (!mgmt_only && !bssid) { return 0; }
+
+    /*
+     * Classic BPF loads are big-endian; RadioTap it_len is little-endian, so
+     * assemble it as (byte[3] << 8) | byte[2] and put it in X.  X then points
+     * at the 802.11 Frame Control field, independent of host endianness.
+     */
+    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 3);
+    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_ALU | BPF_LSH | BPF_K, 8);
+    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_MISC | BPF_TAX, 0);
+    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 2);
+    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_ALU | BPF_OR | BPF_X, 0);
+    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_MISC | BPF_TAX, 0); /* X = it_len */
+
+    if (mgmt_only) {
+        /* Reject anything whose Frame Control Type bits are not Management */
+        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_B | BPF_IND, 0);
+        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_ALU | BPF_AND | BPF_K, 0x0c);
+        insns[pc++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x00, 0, 0);
+        /* jf patched below to the reject instruction */
+        addr_jumps[addr_count++] = (unsigned short)(pc - 1u);
+    }
+
+    if (bssid) {
+        /* Match BSSID against Addr1 (X+4), Addr2 (X+10) and Addr3 (X+16).
+         * Addr3 is the BSSID for Management frames; Data/EAPOL frames carry
+         * the BSSID in Addr1 (ToDS) or Addr2 (FromDS), so all three must be
+         * checked to preserve handshake/data traffic. */
+        static const unsigned short addr_offsets[3] = { 4u, 10u, 16u };
+
+        bssid_hi = ((uint32_t)bssid[0] << 24)
+                 | ((uint32_t)bssid[1] << 16)
+                 | ((uint32_t)bssid[2] << 8)
+                 |  (uint32_t)bssid[3];
+        bssid_lo = ((uint32_t)bssid[4] << 8)
+                 |  (uint32_t)bssid[5];
+
+        for (i = 0; i < 3u; i++) {
+            unsigned short off = addr_offsets[i];
+
+            insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_IND, off);
+            /* No match -> skip the 2-instruction low-half check (next block) */
+            insns[pc++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
+                                                       bssid_hi, 0, 2);
+            insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_H | BPF_IND,
+                                                       (unsigned short)(off + 4u));
+            /* Match -> jump to accept (patched after program is complete) */
+            insns[pc++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
+                                                       bssid_lo, 0, 0);
+            addr_jumps[addr_count++] = (unsigned short)(pc - 1u);
+        }
+    }
+
+    if (pc == 6u) {
+        return -1;
+    }
+
+    reject_pc = pc;
+    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, 0);
+    accept_pc = pc;
+    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, 65535);
+
+    /* Patch jumps: match -> accept, non-management -> reject */
+    for (i = 0; i < addr_count; i++) {
+        unsigned short at = addr_jumps[i];
+
+        if (i == 0u && mgmt_only) {
+            if (bssid) {
+                /* Management frames fall through to the address blocks;
+                 * anything else jumps straight to reject. */
+                insns[at].jt = 0;
+                insns[at].jf = (uint8_t)(reject_pc - at - 1u);
+            } else {
+                /* Type-only filter: match -> accept, else fall to reject. */
+                insns[at].jt = (uint8_t)(accept_pc - at - 1u);
+                insns[at].jf = 0;
+            }
+        } else {
+            insns[at].jt = (uint8_t)(accept_pc - at - 1u);
+            insns[at].jf = 0;
+        }
+    }
+
+    *len_out = pc;
+    return 0;
+}
+
+/*
+ * capture_set_filter — Attach classic BPF bytecode filter to AF_PACKET socket (§3.4).
+ * Filters by frame type (mgmt_only) and/or target BSSID.
+ */
 int capture_set_filter(daemon_t *d, bool mgmt_only, const uint8_t *bssid)
 {
-    struct sock_filter  insns[32];
-    unsigned short      pc = 0;
-    struct sock_fprog   prog;
-    uint32_t            bssid_hi = 0;
-    uint32_t            bssid_lo = 0;
-    unsigned short      addr_jumps[4];  /* type check + 3 address checks */
-    unsigned short      addr_count = 0;
-    unsigned short      accept_pc;
-    unsigned short      reject_pc;
-    unsigned short      i;
+    struct sock_filter insns[32];
+    unsigned short     pc = 0;
+    struct sock_fprog  prog;
 
     d->filter_mgmt_only = mgmt_only;
     if (bssid) {
@@ -273,91 +366,10 @@ int capture_set_filter(daemon_t *d, bool mgmt_only, const uint8_t *bssid)
         return 0;
     }
 
-    /*
-     * Build Classic BPF Filter for RadioTap + IEEE 802.11.
-     *
-     * Classic BPF loads are big-endian; RadioTap it_len is little-endian, so
-     * assemble it as (byte[3] << 8) | byte[2] and put it in X.  X then points
-     * at the 802.11 Frame Control field, independent of host endianness.
-     * (X is used as the temporary for the high byte: classic BPF ALU ops only
-     *  accept K or X sources, not scratch memory.)
-     */
-    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 3);
-    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_ALU | BPF_LSH | BPF_K, 8);
-    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_MISC | BPF_TAX, 0);
-    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 2);
-    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_ALU | BPF_OR | BPF_X, 0);
-    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_MISC | BPF_TAX, 0); /* X = it_len */
-
-    if (mgmt_only) {
-        /* Reject anything whose Frame Control Type bits are not Management */
-        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_B | BPF_IND, 0);
-        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_ALU | BPF_AND | BPF_K, 0x0c);
-        insns[pc++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x00, 0, 0);
-        /* jf patched below to the reject instruction */
-        addr_jumps[addr_count++] = (unsigned short)(pc - 1u);
-    }
-
-    if (d->filter_bssid_set) {
-        /* Match BSSID against Addr1 (X+4), Addr2 (X+10) and Addr3 (X+16).
-         * Addr3 is the BSSID for Management frames; Data/EAPOL frames carry
-         * the BSSID in Addr1 (ToDS) or Addr2 (FromDS), so all three must be
-         * checked to preserve handshake/data traffic. */
-        static const unsigned short addr_offsets[3] = { 4u, 10u, 16u };
-
-        bssid_hi = ((uint32_t)d->filter_bssid[0] << 24)
-                 | ((uint32_t)d->filter_bssid[1] << 16)
-                 | ((uint32_t)d->filter_bssid[2] << 8)
-                 |  (uint32_t)d->filter_bssid[3];
-        bssid_lo = ((uint32_t)d->filter_bssid[4] << 8)
-                 |  (uint32_t)d->filter_bssid[5];
-
-        for (i = 0; i < 3u; i++) {
-            unsigned short off = addr_offsets[i];
-
-            insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_IND, off);
-            /* No match -> skip the 2-instruction low-half check (next block) */
-            insns[pc++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
-                                                       bssid_hi, 0, 2);
-            insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_H | BPF_IND,
-                                                       (unsigned short)(off + 4u));
-            /* Match -> jump to accept (patched after program is complete) */
-            insns[pc++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
-                                                       bssid_lo, 0, 0);
-            addr_jumps[addr_count++] = (unsigned short)(pc - 1u);
-        }
-    }
-
-    if (pc == 6u) {
-        /* Defensive: no filter predicates emitted (should not happen). */
-        util_log("capture", "BPF filter build produced no predicates");
+    if (capture_build_bpf(mgmt_only, d->filter_bssid_set ? d->filter_bssid : NULL,
+                          insns, 32u, &pc) < 0 || pc == 0) {
+        util_log("capture", "BPF filter build failed");
         return -1;
-    }
-
-    reject_pc = pc;
-    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, 0);
-    accept_pc = pc;
-    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, 65535);
-
-    /* Patch jumps: match -> accept, non-management -> reject */
-    for (i = 0; i < addr_count; i++) {
-        unsigned short at = addr_jumps[i];
-
-        if (i == 0u && mgmt_only) {
-            if (d->filter_bssid_set) {
-                /* Management frames fall through to the address blocks;
-                 * anything else jumps straight to reject. */
-                insns[at].jt = 0;
-                insns[at].jf = (uint8_t)(reject_pc - at - 1u);
-            } else {
-                /* Type-only filter: match -> accept, else fall to reject. */
-                insns[at].jt = (uint8_t)(accept_pc - at - 1u);
-                insns[at].jf = 0;
-            }
-        } else {
-            insns[at].jt = (uint8_t)(accept_pc - at - 1u);
-            insns[at].jf = 0;
-        }
     }
 
     prog.len    = pc;
@@ -376,6 +388,33 @@ int capture_set_filter(daemon_t *d, bool mgmt_only, const uint8_t *bssid)
 }
 
 /*
+ * capture_recover_interface — Self-healing recovery when wlan0 drops (§4.2).
+ * Closes stale packet socket, re-enters monitor mode on current channel,
+ * and rebinds AF_PACKET + active BPF filter.
+ */
+int capture_recover_interface(daemon_t *d)
+{
+    int ch = (d->channel >= CHAN_MIN && d->channel <= CHAN_MAX) ? d->channel : 1;
+
+    util_log("capture", "self-healing: recovering interface %s on ch %d",
+             d->wlan_iface, ch);
+    capture_close(d);
+
+    if (radio_enter_monitor(d, ch) < 0) {
+        util_log("capture", "self-healing: radio_enter_monitor failed");
+        return -1;
+    }
+    if (capture_open(d) < 0) {
+        util_log("capture", "self-healing: capture_open failed");
+        return -1;
+    }
+    d->iface_recoveries++;
+    util_log("capture", "self-healing: recovery #%llu succeeded",
+             (unsigned long long)d->iface_recoveries);
+    return 0;
+}
+
+/*
  * capture_read_frame — Attempt to read one frame from the packet socket
  * and push it into the ring buffer.
  *
@@ -383,6 +422,7 @@ int capture_set_filter(daemon_t *d, bool mgmt_only, const uint8_t *bssid)
  *   1  — frame read and pushed (or mock frame generated)
  *   0  — no frame available (EAGAIN/EWOULDBLOCK)
  *  -1  — error
+ *  -2  — interface down / missing (ENETDOWN / ENODEV / ENXIO) — triggers self-heal
  */
 int capture_read_frame(daemon_t *d)
 {
@@ -410,6 +450,11 @@ int capture_read_frame(daemon_t *d)
         if (n < 0) {
             if (errno == EINTR)              { continue; }
             if (errno == EAGAIN || errno == EWOULDBLOCK) { return 0; }
+            if (errno == ENETDOWN || errno == ENODEV || errno == ENXIO) {
+                util_log("capture", "recv interface lost (%s) — requesting recovery",
+                         strerror(errno));
+                return -2;
+            }
             util_log("capture", "recv: %s", strerror(errno));
             return -1;
         }
@@ -428,8 +473,6 @@ int capture_read_frame(daemon_t *d)
 /*
  * capture_ring_pop — Pop one frame from the ring into buf (for stream.c).
  * Returns frame length, 0 if ring empty, -1 on error.
- * (Called from stream.c via inline access — exposed via this translation unit
- *  to keep the ring buffer private.)
  */
 int capture_ring_pop(daemon_t *d, uint8_t *buf, size_t bufsize,
                      uint16_t *frame_len_out)
