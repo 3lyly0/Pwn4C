@@ -364,3 +364,25 @@ func (c *ControlClient) StopHop() error {
 	return nil
 }
 
+// SetFilter configures classic BPF frame filtering (mgmt_only and/or BSSID)
+func (c *ControlClient) SetFilter(mgmtOnly bool, bssid string) error {
+	params := map[string]interface{}{
+		"mgmt_only": mgmtOnly,
+	}
+	if bssid != "" {
+		params["bssid"] = bssid
+	}
+	resp, err := c.SendCommand("SET_FILTER", params)
+	if err != nil {
+		return err
+	}
+	if strings.ToLower(resp.Status) != "ok" {
+		if resp.Error != nil {
+			return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+		}
+		return fmt.Errorf("failed to set filter")
+	}
+	return nil
+}
+
+

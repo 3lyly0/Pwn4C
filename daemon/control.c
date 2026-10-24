@@ -315,6 +315,24 @@ static void cmd_start_monitor(daemon_t *d, const char *id, const char *params)
     d->frames_dropped  = 0;
     d->stream_seq      = 0;
 
+    /* Apply BPF frame filter if requested in start params (§3.4) */
+    {
+        int mgmt_only = 0;
+        char bssid_str[32];
+        uint8_t bssid[6];
+        bool has_bssid = false;
+
+        (void)json_get_int(params, "mgmt_only", &mgmt_only);
+        if (json_get_str(params, "bssid", bssid_str, sizeof(bssid_str)) == 0) {
+            if (util_parse_mac(bssid_str, bssid) == 0) {
+                has_bssid = true;
+            }
+        }
+        if (mgmt_only || has_bssid) {
+            (void)capture_set_filter(d, mgmt_only != 0, has_bssid ? bssid : NULL);
+        }
+    }
+
     /* Build stream target string for response */
     {
         struct in_addr ia;
@@ -489,6 +507,45 @@ static void cmd_hop_stop(daemon_t *d, const char *id)
     char data[64];
     d->hop_enabled = false;
     (void)snprintf(data, sizeof(data), "{\"hop_active\":false,\"channel\":%d}", d->channel);
+    send_ok(d, id, data);
+}
+
+static void cmd_set_filter(daemon_t *d, const char *id, const char *params)
+{
+    char bssid_str[32];
+    uint8_t bssid[6];
+    bool has_bssid = false;
+    int mgmt_only = 0;
+    int reset = 0;
+    char data[128];
+
+    (void)json_get_int(params, "reset", &reset);
+    if (reset) {
+        (void)capture_set_filter(d, false, NULL);
+        send_ok(d, id, "{\"filter_active\":false}");
+        return;
+    }
+
+    (void)json_get_int(params, "mgmt_only", &mgmt_only);
+
+    if (json_get_str(params, "bssid", bssid_str, sizeof(bssid_str)) == 0) {
+        if (util_parse_mac(bssid_str, bssid) < 0) {
+            send_error(d, id, "INVALID_BSSID", "Malformed BSSID MAC address");
+            return;
+        }
+        has_bssid = true;
+    }
+
+    if (capture_set_filter(d, mgmt_only != 0, has_bssid ? bssid : NULL) < 0) {
+        send_error(d, id, "FILTER_ERROR", "Failed to attach BPF filter");
+        return;
+    }
+
+    (void)snprintf(data, sizeof(data),
+        "{\"filter_active\":%s,\"mgmt_only\":%s,\"bssid_filtered\":%s}",
+        d->filter_active ? "true" : "false",
+        d->filter_mgmt_only ? "true" : "false",
+        d->filter_bssid_set ? "true" : "false");
     send_ok(d, id, data);
 }
 
@@ -892,6 +949,8 @@ int ctrl_handle_line(daemon_t *d, const char *line)
         cmd_restore_normal(d, id);
     } else if (strcmp(cmd, "SET_CHANNEL") == 0) {
         cmd_set_channel(d, id, params);
+    } else if (strcmp(cmd, "SET_FILTER") == 0) {
+        cmd_set_filter(d, id, params);
     } else if (strcmp(cmd, "HOP_START") == 0) {
         cmd_hop_start(d, id, params);
     } else if (strcmp(cmd, "HOP_STOP") == 0) {

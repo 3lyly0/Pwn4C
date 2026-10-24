@@ -12,9 +12,11 @@ import (
 )
 
 var (
-	monitorChannel int
-	monitorOutput  string
-	monitorTarget  string
+	monitorChannel     int
+	monitorOutput      string
+	monitorTarget      string
+	monitorMgmtOnly    bool
+	monitorFilterBSSID string
 )
 
 var monitorCmd = &cobra.Command{
@@ -73,6 +75,14 @@ var monitorCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
+		if monitorMgmtOnly || monitorFilterBSSID != "" {
+			fmt.Printf("[+] Attaching kernel BPF frame filter (mgmt_only=%v, bssid=%s)...\n",
+				monitorMgmtOnly, monitorFilterBSSID)
+			if err := client.SetFilter(monitorMgmtOnly, monitorFilterBSSID); err != nil {
+				fmt.Printf("[!] Warning: failed to attach BPF filter: %v\n", err)
+			}
+		}
+
 		fmt.Println("[+] Monitor mode streaming active. Press Ctrl+C to stop.")
 
 		// Handle graceful termination
@@ -93,5 +103,7 @@ func init() {
 	monitorCmd.Flags().IntVarP(&monitorChannel, "channel", "c", 1, "Wi-Fi channel to monitor (1-13)")
 	monitorCmd.Flags().StringVarP(&monitorOutput, "output", "o", "capture.pcap", "Destination PCAP file path")
 	monitorCmd.Flags().StringVarP(&monitorTarget, "target", "t", "", "Target drone IP (defaults to auto-discovery)")
+	monitorCmd.Flags().BoolVar(&monitorMgmtOnly, "mgmt-only", false, "Kernel BPF filter: 802.11 management frames only")
+	monitorCmd.Flags().StringVar(&monitorFilterBSSID, "filter-bssid", "", "Kernel BPF filter: target BSSID MAC address")
 	rootCmd.AddCommand(monitorCmd)
 }
