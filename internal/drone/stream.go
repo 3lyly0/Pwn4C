@@ -24,17 +24,28 @@ const (
 	LinkTypeIEEE80211Radio = 127 // DLT_IEEE802_11_RADIO (RadioTap header)
 )
 
-// PCAPWriter writes raw frames to a standard .pcap file
+// PCAPWriter writes raw frames to a standard .pcap file or os.Stdout ("-")
 type PCAPWriter struct {
-	file *os.File
-	mu   sync.Mutex
+	file     *os.File
+	isStdout bool
+	mu       sync.Mutex
 }
 
-// NewPCAPWriter initializes and writes the global PCAP file header
+// NewPCAPWriter initializes and writes the global PCAP file header.
+// When filepath is "-", PCAP records are streamed directly to os.Stdout (§4.3).
 func NewPCAPWriter(filepath string) (*PCAPWriter, error) {
-	f, err := os.Create(filepath)
-	if err != nil {
-		return nil, fmt.Errorf("create pcap file: %w", err)
+	var f *os.File
+	var isStdout bool
+
+	if filepath == "-" {
+		f = os.Stdout
+		isStdout = true
+	} else {
+		var err error
+		f, err = os.Create(filepath)
+		if err != nil {
+			return nil, fmt.Errorf("create pcap file: %w", err)
+		}
 	}
 
 	// Write 24-byte Global PCAP Header
@@ -48,11 +59,13 @@ func NewPCAPWriter(filepath string) (*PCAPWriter, error) {
 	binary.LittleEndian.PutUint32(hdr[20:24], LinkTypeIEEE80211Radio) // network / DLT
 
 	if _, err := f.Write(hdr); err != nil {
-		f.Close()
+		if !isStdout {
+			f.Close()
+		}
 		return nil, fmt.Errorf("write pcap header: %w", err)
 	}
 
-	return &PCAPWriter{file: f}, nil
+	return &PCAPWriter{file: f, isStdout: isStdout}, nil
 }
 
 // WriteFrame appends a captured packet with standard PCAP record header
@@ -75,11 +88,11 @@ func (w *PCAPWriter) WriteFrame(data []byte, ts time.Time) error {
 	return nil
 }
 
-// Close closes the file
+// Close closes the file (or flushes stdout without closing fd 1)
 func (w *PCAPWriter) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.file != nil {
+	if w.file != nil && !w.isStdout {
 		return w.file.Close()
 	}
 	return nil
