@@ -138,6 +138,8 @@ typedef struct {
     /* Telemetry counters */
     uint64_t     frames_captured;
     uint64_t     frames_dropped;
+    uint64_t     ring_overruns;         /* ring buffer drops (tail advance count)  */
+    uint64_t     inject_failures;       /* injection TX failures                   */
     uint32_t     stream_seq;            /* next stream sequence number        */
 
     /* Monitor session start (for timestamp_us) — stored as struct timespec   *
@@ -189,6 +191,7 @@ int     radio_restore_normal(daemon_t *d);
 int     capture_open(daemon_t *d);
 void    capture_close(daemon_t *d);
 int     capture_read_frame(daemon_t *d);   /* returns 1=frame queued, 0=none, -1=err */
+int     capture_get_kernel_drops(daemon_t *d, uint32_t *tp_drops_out);
 
 /* stream.c */
 int     stream_open(daemon_t *d);

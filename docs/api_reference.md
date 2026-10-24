@@ -180,7 +180,12 @@ Returns the current operational state of the Drone.
     "cpu_temp_celsius": 52,
     "free_ram_bytes": 50593792,
     "firmware_version": "0.1.0",
-    "drone_id": "pwn4c-a3f7"
+    "drone_id": "pwn4c-a3f7",
+    "rx_frames": 12054,
+    "tx_frames": 11980,
+    "ring_overruns": 0,
+    "inject_failures": 0,
+    "kernel_drops": 0
   }
 }
 ```
@@ -197,6 +202,11 @@ Returns the current operational state of the Drone.
 | `free_ram_bytes` | integer | Available system memory |
 | `firmware_version` | string | Running firmware version |
 | `drone_id` | string | Drone identifier |
+| `rx_frames` | integer | Total frames captured into the ring buffer |
+| `tx_frames` | integer | Total frames successfully drained and streamed over UDP |
+| `ring_overruns` | integer | Frames dropped due to ring buffer saturation |
+| `inject_failures` | integer | Number of raw 802.11 injection failures |
+| `kernel_drops` | integer | Dropped frames reported by Linux socket `PACKET_STATISTICS` |
 
 ---
 
