@@ -67,6 +67,14 @@ int stream_open(daemon_t *d)
     }
 
     /* Allow send even without explicit bind (OS chooses ephemeral port) */
+    /* §2.1: Expand kernel send buffer to 256 KiB for burst tolerance */
+    {
+        int sndbuf = 262144;
+        if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0) {
+            util_log("stream", "SO_SNDBUF: %s (non-fatal)", strerror(errno));
+        }
+    }
+
     d->stream_fd = fd;
     util_log("stream", "UDP stream socket ready (fd=%d)", fd);
     return 0;
