@@ -138,7 +138,7 @@ ssh root@192.168.4.1 "logread | grep pwn4cd"
 
 **Fix:** Use manual installation (Path B). Flash via TFTP recovery mode or UART. See [installation.md](installation.md#path-b-manual-build-and-advanced-installation).
 
-**Verification:** Check the router's firmware version via its web interface at `http://192.168.31.1`. Compare against known vulnerable versions listed in the OpenWRTInvasion project.
+**Verification:** Check the router's firmware version via its web interface at `http://192.168.31.1`. Compare against the known vulnerable versions listed in [installation.md](installation.md#path-a-automated-zero-touch-installation-recommended).
 
 ### `Command injection failed`
 
@@ -149,6 +149,28 @@ ssh root@192.168.4.1 "logread | grep pwn4cd"
 **Cause:** The `stok` token was extracted, but the injection endpoint is patched (CVE-2019-18370 closed independently of 18371 in some firmware builds).
 
 **Fix:** Same as above. Fall back to Path B.
+
+### `busybox` is embedded — no router internet or host callback needed
+
+`pwn4c infect` no longer downloads BusyBox from GitHub and no longer asks the
+router to connect back to a host TCP port for the shell stage. The uploaded
+`tar.gz` contains `speedtest_urls.xml`, `script.sh`, and the vendored
+`busybox-mipsel` binary. After `c_upload` extracts the archive to `/tmp`, the
+injected script runs `/tmp/busybox telnetd` directly.
+
+Consequences:
+
+- The router does **not** need internet access.
+- The host does **not** need an inbound firewall rule or port forward.
+- The host starts a local TCP server only when `--flash` is used, to serve the
+  sysupgrade image. Without `--flash`, no callback listener is started.
+- A missing callback is not a failure. Success is decided by probing ports
+  23/22 after the trigger.
+
+The BusyBox binary is vendored at
+`internal/exploit/assets/busybox-mipsel` and compiled into the CLI with
+`//go:embed`. If you build from a source checkout that lacks this file, place
+a compatible statically linked MIPSel BusyBox binary there before building.
 
 ### `router rejected archive: code=1629` (解压失败，可能文件已经损坏)
 
@@ -163,7 +185,35 @@ ssh root@192.168.4.1 "logread | grep pwn4cd"
 2. Downgrade to a vulnerable build (4C: `2.14.75`–`2.14.92`, or Global `3.0.23` per community reports), then re-run `pwn4c infect`. Note the stock web UI usually rejects downgrade images at file-check, so use the Xiaomi Repair Tool / `mtd write` route (see OpenWrt wiki for the 4C) or UART.
 3. Alternatively try a newer exploit primitive for your model/firmware (e.g. the `get_icon` vector used by community patcher tools), or fall back to Path B (TFTP/UART flash).
 
-**Note:** `pwn4c infect` deliberately does not abort on `1629` — like upstream OpenWRTInvasion, it still runs the `netspeed` trigger and then verifies ports 23/22, so a partially-working target still gets detected.
+**Note:** `pwn4c infect` deliberately does not abort on `1629` — it still runs the `netspeed` trigger and then verifies ports 23/22, so a partially-working target still gets detected. `code=1629` is not necessarily fatal: some firmware extracts and executes the archive anyway.
+
+### `telnet (23) and ssh (22) are both closed`
+
+`infect` treats this as the final failure because the embedded BusyBox telnetd
+did not come up. BusyBox delivery itself is not the problem anymore, so check:
+
+1. **Patched firmware** — the upload or command-injection vector is closed
+   (China `2.14.502`, some 4A Gigabit builds). Downgrade to a vulnerable build
+   or use Path B (TFTP/UART). This is the most common cause.
+2. **Wrong admin password** — authentication normally fails earlier with
+   `login rejected (code=...)`, but a stale/incorrect saved password can leave
+   you triggering against a session that never had permission to upload.
+3. **LAN issues** — the host must be on a LAN port (not WAN), on the router's
+   subnet (`192.168.31.0/24` by default), with no host firewall blocking
+   outbound TCP to the router. Try `ping 192.168.31.1` and open
+   `http://192.168.31.1` in a browser.
+4. **Trigger not deterministic** — retry `pwn4c infect` once. The `netspeed`
+   request occasionally does not execute the injected command.
+5. **No `/tmp` space or noexec** — reboot the router to clear `/tmp`, then
+   retry. A full tmpfs prevents the archive from being extracted.
+
+To diagnose manually, watch the port check while retrying:
+
+```bash
+# Linux/macOS
+nc -vz 192.168.31.1 23
+nc -vz 192.168.31.1 22
+```
 
 ### `SSH connection refused after injection`
 
@@ -172,7 +222,7 @@ ssh root@192.168.4.1 "logread | grep pwn4cd"
 [!] SSH connection to 192.168.31.1:22 refused.
 ```
 
-**Cause:** The injected payload executed, but the SSH/telnet daemon failed to start. Possible reasons: insufficient `/tmp` space, or a modified init system that blocks new services.
+**Cause:** The injected payload executed, but the SSH/telnet daemon failed to start. BusyBox is embedded in the archive, so this is not a download/callback problem. Possible reasons: insufficient `/tmp` space to extract the ~1.6 MB binary, a modified init system that blocks new services, or a busybox/telnetd incompatibility on the target firmware.
 
 **Fix:**
 1. Retry `pwn4c infect` once. The injection is not always deterministic.

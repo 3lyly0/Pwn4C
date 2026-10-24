@@ -69,7 +69,7 @@ The Drone performs zero frame analysis. It is a dumb RF transceiver controlled e
 
 ## Automated Infection Lifecycle
 
-The Go client includes a built-in `infect` command that converts a stock Xiaomi Mi Router 4C into a Pwn4C Drone in a single step. This leverages the OpenWRTInvasion exploit chain targeting CVE-2019-18370 and CVE-2019-18371 (command injection in the stock Xiaomi web interface).
+The Go client includes a built-in `infect` command that converts a stock Xiaomi Mi Router 4C into a Pwn4C Drone in a single step. This leverages the CVE-2019-18370 and CVE-2019-18371 exploit chain (command injection in the stock Xiaomi web interface).
 
 ### Exploit Flow
 
@@ -99,8 +99,8 @@ Host                                    Stock Xiaomi Router 4C
 ### Steps in Detail
 
 1. **Credential extraction**: The client sends an HTTP request to the router's web API, exploiting CVE-2019-18371 to extract the `stok` authentication token and device configuration.
-2. **Command injection**: Using the `stok` token, the client injects a shell command via CVE-2019-18370 that enables telnet or SSH access on the router.
-3. **Firmware upload**: The client opens an SSH (or telnet) session and uploads the Pwn4C OpenWrt firmware binary to `/tmp` on the router.
+2. **Command injection**: Using the `stok` token, the client injects a shell command via CVE-2019-18370 that enables telnet or SSH access on the router. The uploaded tarball embeds a `busybox-mipsel` binary, so the router needs no internet access and the host needs no inbound callback port for this stage.
+3. **Firmware upload**: With `--flash`, the client opens an SSH (or telnet) session and uploads the Pwn4C OpenWrt firmware binary to `/tmp` on the router. The optional firmware server is the only reason `infect` opens a local TCP listener.
 4. **Flash write**: The client executes `mtd write /tmp/pwn4c-firmware.bin OS1` to overwrite the operating system partition. The factory calibration partition is not touched.
 5. **Reboot**: The client issues `reboot`. The router boots into the Pwn4C OpenWrt image.
 6. **Verification**: The client begins broadcasting UDP discovery packets on port 4440. Once the Drone responds with an `ANNOUNCE` packet, infection is confirmed.

