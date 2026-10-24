@@ -82,6 +82,10 @@ func limitedBroadcast() *net.UDPAddr {
 	return &net.UDPAddr{IP: net.IPv4bcast, Port: DefaultDiscoveryPort}
 }
 
+// ClientVersion is the version string advertised in DISCOVER packets. The CLI
+// sets it from its own build version at startup; library users get the default.
+var ClientVersion = "dev"
+
 // Discover probes every usable IPv4 interface for listening drones.
 //
 // Sending a single packet to 255.255.255.255 is not enough on a multi-homed
@@ -107,7 +111,7 @@ func Discover(timeout time.Duration, ifaceName string) ([]DiscoveredDrone, error
 		Type:          "DISCOVER",
 		Version:       ProtocolVersion,
 		Client:        "pwn4c",
-		ClientVersion: "0.1.0",
+		ClientVersion: ClientVersion,
 		Timestamp:     time.Now().Unix(),
 	})
 	if err != nil {
