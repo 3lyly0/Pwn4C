@@ -33,6 +33,7 @@
 #include <time.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>
 #include <net/if.h>
 #include <net/if_arp.h>
 #include <linux/netlink.h>
@@ -150,12 +151,18 @@ static int iface_set_mac(const char *ifname, const uint8_t mac[6])
 #endif
 
 /*
- * Open Generic Netlink socket. Returns file descriptor or -1.
+ * Get (and lazily create) the persistent Generic Netlink socket.
+ * Keeping the fd cached in daemon_t avoids per-hop socket churn (§3.5.3).
  */
-static int nl_open_socket(void)
+static int nl_socket_get(daemon_t *d)
 {
     int fd;
     struct sockaddr_nl local;
+    struct timeval tv;
+
+    if (d->nl_fd >= 0) {
+        return d->nl_fd;
+    }
 
     fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_GENERIC);
     if (fd < 0) {
@@ -169,15 +176,33 @@ static int nl_open_socket(void)
         return -1;
     }
 
+    /* Never block the event loop indefinitely if the kernel stops replying. */
+    tv.tv_sec  = IW_TIMEOUT_SECS;
+    tv.tv_usec = 0;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    d->nl_fd = fd;
     return fd;
 }
 
 /*
- * Query nl80211 generic netlink family ID from kernel.
+ * Release the persistent Generic Netlink socket.
  */
-static int nl_get_family_id(int fd)
+void radio_netlink_close(daemon_t *d)
 {
-    static int cached_id = -1;
+    if (d->nl_fd >= 0) {
+        close(d->nl_fd);
+        d->nl_fd = -1;
+    }
+    d->nl_family_id = -1;
+}
+
+/*
+ * Query nl80211 generic netlink family ID from kernel (cached in daemon_t).
+ */
+static int nl_get_family_id(daemon_t *d)
+{
+    int fd;
     struct {
         struct nlmsghdr n;
         struct genlmsghdr g;
@@ -191,8 +216,13 @@ static int nl_get_family_id(int fd)
     ssize_t len;
     int attrlen;
 
-    if (cached_id > 0) {
-        return cached_id;
+    if (d->nl_family_id > 0) {
+        return d->nl_family_id;
+    }
+
+    fd = nl_socket_get(d);
+    if (fd < 0) {
+        return -1;
     }
 
     memset(&req, 0, sizeof(req));
@@ -234,14 +264,27 @@ static int nl_get_family_id(int fd)
 
         while (NLA_OK(na, attrlen)) {
             if (na->nla_type == CTRL_ATTR_FAMILY_ID) {
-                cached_id = (int)*(uint16_t *)((char *)na + NLA_HDRLEN);
-                return cached_id;
+                d->nl_family_id = (int)*(uint16_t *)((char *)na + NLA_HDRLEN);
+                return d->nl_family_id;
             }
             na = NLA_NEXT(na, attrlen);
         }
         nlh = NLMSG_NEXT(nlh, len);
     }
     return -1;
+}
+
+/*
+ * Discard any stale messages left in the persistent socket queue so a late
+ * ACK from a timed-out request cannot be mistaken for the current reply.
+ */
+static void nl_drain(int fd)
+{
+    char tmp[1024];
+
+    while (recv(fd, tmp, sizeof(tmp), MSG_DONTWAIT) > 0) {
+        /* discard */
+    }
 }
 
 /*
@@ -253,6 +296,8 @@ static int nl_send_and_ack(int fd, struct nlmsghdr *nlh)
     char buf[512];
     ssize_t len;
     struct nlmsghdr *resp;
+
+    nl_drain(fd);
 
     memset(&nladdr, 0, sizeof(nladdr));
     nladdr.nl_family = AF_NETLINK;
@@ -281,7 +326,7 @@ static int nl_send_and_ack(int fd, struct nlmsghdr *nlh)
 /*
  * Native nl80211 set channel/frequency.
  */
-static int nl80211_set_channel(const char *ifname, int channel)
+static int nl80211_set_channel(daemon_t *d, int channel)
 {
     int fd;
     int family_id;
@@ -295,21 +340,20 @@ static int nl80211_set_channel(const char *ifname, int channel)
     } req;
     struct nlattr *na;
 
-    ifindex = if_nametoindex(ifname);
+    ifindex = if_nametoindex(d->wlan_iface);
     if (ifindex == 0) {
         return -1;
     }
 
     freq_mhz = (channel == 14) ? 2484u : (uint32_t)(2407 + channel * 5);
 
-    fd = nl_open_socket();
+    fd = nl_socket_get(d);
     if (fd < 0) {
         return -1;
     }
 
-    family_id = nl_get_family_id(fd);
+    family_id = nl_get_family_id(d);
     if (family_id < 0) {
-        close(fd);
         return -1;
     }
 
@@ -335,15 +379,23 @@ static int nl80211_set_channel(const char *ifname, int channel)
     *(uint32_t *)((char *)na + NLA_HDRLEN) = freq_mhz;
     req.n.nlmsg_len = NLMSG_ALIGN(req.n.nlmsg_len) + (uint32_t)NLA_ALIGN(na->nla_len);
 
+    /* Attr: NL80211_ATTR_WIPHY_CHANNEL_TYPE (HT20)
+     * kmod-mt76 / cfg80211 require an explicit channel width/type or the
+     * SET_WIPHY request is rejected with -EINVAL. */
+    na = (struct nlattr *)((char *)&req + NLMSG_ALIGN(req.n.nlmsg_len));
+    na->nla_type = NL80211_ATTR_WIPHY_CHANNEL_TYPE;
+    na->nla_len = (uint16_t)(NLA_HDRLEN + sizeof(uint32_t));
+    *(uint32_t *)((char *)na + NLA_HDRLEN) = (uint32_t)NL80211_CHAN_HT20;
+    req.n.nlmsg_len = NLMSG_ALIGN(req.n.nlmsg_len) + (uint32_t)NLA_ALIGN(na->nla_len);
+
     ret = nl_send_and_ack(fd, &req.n);
-    close(fd);
     return ret;
 }
 
 /*
  * Native nl80211 set TX power (in mBm).
  */
-static int nl80211_set_txpower(const char *ifname, int mbm)
+static int nl80211_set_txpower(daemon_t *d, int mbm)
 {
     int fd;
     int family_id;
@@ -356,19 +408,18 @@ static int nl80211_set_txpower(const char *ifname, int mbm)
     } req;
     struct nlattr *na;
 
-    ifindex = if_nametoindex(ifname);
+    ifindex = if_nametoindex(d->wlan_iface);
     if (ifindex == 0) {
         return -1;
     }
 
-    fd = nl_open_socket();
+    fd = nl_socket_get(d);
     if (fd < 0) {
         return -1;
     }
 
-    family_id = nl_get_family_id(fd);
+    family_id = nl_get_family_id(d);
     if (family_id < 0) {
-        close(fd);
         return -1;
     }
 
@@ -402,14 +453,13 @@ static int nl80211_set_txpower(const char *ifname, int mbm)
     req.n.nlmsg_len = NLMSG_ALIGN(req.n.nlmsg_len) + (uint32_t)NLA_ALIGN(na->nla_len);
 
     ret = nl_send_and_ack(fd, &req.n);
-    close(fd);
     return ret;
 }
 
 /*
  * Native nl80211 set interface type (monitor vs managed).
  */
-static int nl80211_set_type(const char *ifname, uint32_t iftype)
+static int nl80211_set_type(daemon_t *d, uint32_t iftype)
 {
     int fd;
     int family_id;
@@ -422,19 +472,18 @@ static int nl80211_set_type(const char *ifname, uint32_t iftype)
     } req;
     struct nlattr *na;
 
-    ifindex = if_nametoindex(ifname);
+    ifindex = if_nametoindex(d->wlan_iface);
     if (ifindex == 0) {
         return -1;
     }
 
-    fd = nl_open_socket();
+    fd = nl_socket_get(d);
     if (fd < 0) {
         return -1;
     }
 
-    family_id = nl_get_family_id(fd);
+    family_id = nl_get_family_id(d);
     if (family_id < 0) {
-        close(fd);
         return -1;
     }
 
@@ -461,7 +510,6 @@ static int nl80211_set_type(const char *ifname, uint32_t iftype)
     req.n.nlmsg_len = NLMSG_ALIGN(req.n.nlmsg_len) + (uint32_t)NLA_ALIGN(na->nla_len);
 
     ret = nl_send_and_ack(fd, &req.n);
-    close(fd);
     return ret;
 }
 
@@ -550,7 +598,7 @@ int radio_enter_monitor(daemon_t *d, int channel)
 
     /* Step 3: set monitor type (Direct netlink with iw fallback) */
 #ifndef USE_IW_FALLBACK
-    r = nl80211_set_type(d->wlan_iface, NL80211_IFTYPE_MONITOR);
+    r = nl80211_set_type(d, NL80211_IFTYPE_MONITOR);
 #else
     r = -1;
 #endif
@@ -576,7 +624,7 @@ int radio_enter_monitor(daemon_t *d, int channel)
 
     /* Step 5: set channel (Direct netlink with iw fallback) */
 #ifndef USE_IW_FALLBACK
-    r = nl80211_set_channel(d->wlan_iface, channel);
+    r = nl80211_set_channel(d, channel);
 #else
     r = -1;
 #endif
@@ -609,7 +657,7 @@ int radio_exit_monitor(daemon_t *d)
 
     /* Restore managed type */
 #ifndef USE_IW_FALLBACK
-    (void)nl80211_set_type(d->wlan_iface, NL80211_IFTYPE_STATION);
+    (void)nl80211_set_type(d, NL80211_IFTYPE_STATION);
 #endif
     (void)iw_run("iw dev %s set type managed 2>/dev/null; true", d->wlan_iface);
 
@@ -635,7 +683,7 @@ int radio_set_channel(daemon_t *d, int channel)
     if (channel < CHAN_MIN || channel > CHAN_MAX) { return -1; }
 
 #ifndef USE_IW_FALLBACK
-    r = nl80211_set_channel(d->wlan_iface, channel);
+    r = nl80211_set_channel(d, channel);
     if (r == 0) {
         d->channel = channel;
         util_log("radio", "channel -> %d (nl80211)", channel);
@@ -670,7 +718,7 @@ int radio_set_txpower(daemon_t *d, int dbm)
     mbm = dbm * 100;
 
 #ifndef USE_IW_FALLBACK
-    r = nl80211_set_txpower(d->wlan_iface, mbm);
+    r = nl80211_set_txpower(d, mbm);
     if (r == 0) {
         d->tx_power_dbm = dbm;
         util_log("radio", "txpower -> %d dBm (nl80211)", dbm);
