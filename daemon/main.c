@@ -209,8 +209,23 @@ int main(int argc, char *argv[])
          * fd events (discovery/control) still wake select() either way. */
         tv.tv_sec  = 0;
         tv.tv_usec = 10000;  /* 10ms */
+        if (g_daemon.hop_enabled && g_daemon.hop_channel_count > 0) {
+            int64_t now_ms = util_monotonic_ms();
+            int64_t diff_ms = g_daemon.next_hop_ms - now_ms;
+            if (diff_ms <= 0) {
+                g_daemon.hop_index = (g_daemon.hop_index + 1) % g_daemon.hop_channel_count;
+                int nxt_chan = g_daemon.hop_channels[g_daemon.hop_index];
+                (void)radio_set_channel(&g_daemon, nxt_chan);
+                g_daemon.next_hop_ms = now_ms + (int64_t)g_daemon.hop_interval_ms;
+                diff_ms = g_daemon.hop_interval_ms;
+            }
+            long hop_usec = (long)(diff_ms * 1000LL);
+            if (hop_usec > 0 && hop_usec < tv.tv_usec) {
+                tv.tv_usec = hop_usec;
+            }
+        }
         {
-            struct timeval *tvp = monitoring ? &tv : NULL;
+            struct timeval *tvp = (monitoring || g_daemon.hop_enabled) ? &tv : NULL;
 
             r = select(maxfd + 1, &rfds, NULL, NULL, tvp);
         }
@@ -219,6 +234,17 @@ int main(int argc, char *argv[])
             if (errno == EINTR) { continue; }
             util_log("main", "select: %s", strerror(errno));
             break;
+        }
+
+        /* ── Autonomous channel hopping (§3.2) ────────────────────────── */
+        if (g_daemon.hop_enabled && g_daemon.hop_channel_count > 0) {
+            int64_t now_ms = util_monotonic_ms();
+            if (now_ms >= g_daemon.next_hop_ms) {
+                g_daemon.hop_index = (g_daemon.hop_index + 1) % g_daemon.hop_channel_count;
+                int nxt_chan = g_daemon.hop_channels[g_daemon.hop_index];
+                (void)radio_set_channel(&g_daemon, nxt_chan);
+                g_daemon.next_hop_ms = now_ms + (int64_t)g_daemon.hop_interval_ms;
+            }
         }
 
         /* ── Discovery ────────────────────────────────────────────────── */

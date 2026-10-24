@@ -178,3 +178,50 @@ int json_field_exists(const char *json, const char *key)
 {
     return find_key(json, key) != NULL ? 1 : 0;
 }
+
+/*
+ * json_get_int_array — Extract an array of integers for key into out array.
+ * Returns 0 on success, -1 if key missing or not an array.
+ */
+int json_get_int_array(const char *json, const char *key, int *out,
+                       size_t max_out, size_t *out_len)
+{
+    const char *p;
+    size_t count = 0;
+
+    if (!out || max_out == 0 || !out_len) { return -1; }
+    *out_len = 0;
+
+    p = find_key(json, key);
+    if (!p) { return -1; }
+
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') { p++; }
+    if (*p != '[') { return -1; }
+    p++; /* skip '[' */
+
+    while (*p != '\0' && *p != ']') {
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ',') {
+            p++;
+        }
+        if (*p == ']') { break; }
+        if (*p == '-' || isdigit((unsigned char)*p)) {
+            char *end = NULL;
+            long v;
+            errno = 0;
+            v = strtol(p, &end, 10);
+            if (errno != 0 || end == p) { return -1; }
+            if (v > INT_MAX || v < INT_MIN) { return -1; }
+            if (count < max_out) {
+                out[count++] = (int)v;
+            }
+            p = end;
+        } else {
+            return -1;
+        }
+    }
+
+    if (*p != ']') { return -1; }
+    *out_len = count;
+    return 0;
+}
+

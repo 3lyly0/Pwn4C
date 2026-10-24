@@ -149,6 +149,13 @@ int64_t util_monotonic_sec(void)
     return (int64_t)ts.tv_sec;
 }
 
+int64_t util_monotonic_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) { return 0; }
+    return (int64_t)ts.tv_sec * 1000LL + (int64_t)ts.tv_nsec / 1000000LL;
+}
+
 int64_t util_monotonic_us(void)
 {
     struct timespec ts;

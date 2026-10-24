@@ -241,7 +241,8 @@ static void cmd_start_monitor(daemon_t *d, const char *id, const char *params)
 
     /* Open stream socket */
     if (stream_open(d) < 0) {
-        capture_close(d);
+        d->hop_enabled = false;
+    capture_close(d);
         (void)radio_exit_monitor(d);
         send_error(d, id, "INTERFACE_ERROR",
                    "Failed to open stream socket");
@@ -280,6 +281,7 @@ static void cmd_stop_monitor(daemon_t *d, const char *id)
         return;
     }
 
+    d->hop_enabled = false;
     capture_close(d);
     stream_close(d);
     tx_close();
@@ -312,7 +314,8 @@ static void cmd_restore_normal(daemon_t *d, const char *id)
     char data[64];
 
     if (d->state == STATE_MONITORING || d->state == STATE_INJECTING) {
-        capture_close(d);
+        d->hop_enabled = false;
+    capture_close(d);
         stream_close(d);
         tx_close();
     }
@@ -367,6 +370,67 @@ static void cmd_set_channel(daemon_t *d, const char *id, const char *params)
 
     (void)snprintf(data, sizeof(data),
         "{\"channel\":%d,\"switch_time_ms\":%d}", channel, elapsed_ms);
+    send_ok(d, id, data);
+}
+
+static void cmd_hop_start(daemon_t *d, const char *id, const char *params)
+{
+    int channels[CHAN_MAX];
+    size_t chan_cnt = 0;
+    int dwell_ms = 250;
+    char data[128];
+    size_t i;
+
+    if (d->state != STATE_MONITORING && d->state != STATE_INJECTING) {
+        send_error(d, id, "NOT_MONITORING",
+                   "Monitor mode must be active before starting channel hopper");
+        return;
+    }
+
+    (void)json_get_int(params, "dwell_ms", &dwell_ms);
+    if (dwell_ms < 50) { dwell_ms = 50; }
+    if (dwell_ms > 60000) { dwell_ms = 60000; }
+
+    if (json_get_int_array(params, "channels", channels, CHAN_MAX, &chan_cnt) < 0
+        || chan_cnt == 0) {
+        /* Default: all 13 channels */
+        chan_cnt = 13;
+        for (i = 0; i < 13; i++) {
+            channels[i] = (int)(i + 1);
+        }
+    } else {
+        for (i = 0; i < chan_cnt; i++) {
+            if (channels[i] < CHAN_MIN || channels[i] > CHAN_MAX) {
+                send_error(d, id, "INVALID_CHANNEL",
+                           "Channel outside allowed range (1-13)");
+                return;
+            }
+        }
+    }
+
+    d->hop_channel_count = (int)chan_cnt;
+    for (i = 0; i < chan_cnt; i++) {
+        d->hop_channels[i] = channels[i];
+    }
+    d->hop_interval_ms = dwell_ms;
+    d->hop_index = 0;
+    d->hop_enabled = true;
+    d->next_hop_ms = util_monotonic_ms() + (int64_t)d->hop_interval_ms;
+
+    /* Immediately tune to first hopping channel */
+    (void)radio_set_channel(d, d->hop_channels[0]);
+
+    (void)snprintf(data, sizeof(data),
+        "{\"hop_active\":true,\"dwell_ms\":%d,\"channel_count\":%d,\"current_channel\":%d}",
+        d->hop_interval_ms, d->hop_channel_count, d->channel);
+    send_ok(d, id, data);
+}
+
+static void cmd_hop_stop(daemon_t *d, const char *id)
+{
+    char data[64];
+    d->hop_enabled = false;
+    (void)snprintf(data, sizeof(data), "{\"hop_active\":false,\"channel\":%d}", d->channel);
     send_ok(d, id, data);
 }
 
@@ -559,7 +623,8 @@ static void cmd_reboot(daemon_t *d, const char *id)
     util_sleep_ms(2000);
     /* Restore radio before reboot */
     if (d->state == STATE_MONITORING || d->state == STATE_INJECTING) {
-        capture_close(d);
+        d->hop_enabled = false;
+    capture_close(d);
         stream_close(d);
         tx_close();
         (void)radio_exit_monitor(d);
@@ -784,6 +849,10 @@ int ctrl_handle_line(daemon_t *d, const char *line)
         cmd_restore_normal(d, id);
     } else if (strcmp(cmd, "SET_CHANNEL") == 0) {
         cmd_set_channel(d, id, params);
+    } else if (strcmp(cmd, "HOP_START") == 0) {
+        cmd_hop_start(d, id, params);
+    } else if (strcmp(cmd, "HOP_STOP") == 0) {
+        cmd_hop_stop(d, id);
     } else if (strcmp(cmd, "SEND_INJECTION") == 0) {
         cmd_send_injection(d, id, params);
     } else if (strcmp(cmd, "SET_TX_POWER") == 0) {
@@ -883,7 +952,8 @@ void ctrl_close_client(daemon_t *d)
     }
     /* If monitor was active, stop it and restore radio */
     if (d->state == STATE_MONITORING || d->state == STATE_INJECTING) {
-        capture_close(d);
+        d->hop_enabled = false;
+    capture_close(d);
         stream_close(d);
         tx_close();
         (void)radio_exit_monitor(d);

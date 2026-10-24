@@ -142,6 +142,14 @@ typedef struct {
     uint64_t     inject_failures;       /* injection TX failures                   */
     uint32_t     stream_seq;            /* next stream sequence number        */
 
+    /* Autonomous channel hopping state (§3.2) */
+    bool         hop_enabled;
+    int          hop_interval_ms;            /* dwell time in ms (e.g. 250)    */
+    int          hop_channels[CHAN_MAX];     /* list of channels 1-13          */
+    int          hop_channel_count;          /* count of channels in hop_channels */
+    int          hop_index;                  /* current index in hop_channels  */
+    int64_t      next_hop_ms;                /* monotonic millisecond timestamp*/
+
     /* Monitor session start (for timestamp_us) — stored as struct timespec   *
      * to avoid float; we compute µs diff using integer arithmetic.           */
     int64_t      monitor_start_sec;
@@ -173,6 +181,7 @@ int     util_read_mac(const char *iface, uint8_t mac[6]);
 void    util_mac_to_str(const uint8_t mac[6], char *buf, size_t n);
 int     util_parse_mac(const char *s, uint8_t mac[6]);
 int64_t util_monotonic_sec(void);
+int64_t util_monotonic_ms(void);
 int64_t util_monotonic_us(void);
 int     util_clock_gettime_sec(int64_t *sec, int32_t *nsec);
 void    util_sleep_ms(int ms);
@@ -213,6 +222,7 @@ int     disc_handle(daemon_t *d);
 /* Tiny zero-allocation JSON field extractor */
 int     json_get_str(const char *json, const char *key, char *out, size_t n);
 int     json_get_int(const char *json, const char *key, int *out);
+int     json_get_int_array(const char *json, const char *key, int *out, size_t max_out, size_t *out_len);
 int     json_field_exists(const char *json, const char *key);
 
 /* mock.c */

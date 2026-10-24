@@ -81,32 +81,20 @@ var hopCmd = &cobra.Command{
 			}
 		}
 
-		fmt.Printf("[+] Starting channel hopper across %v (Dwell: %dms)...\n", channels, hopDwellMs)
-		fmt.Println("[+] Press Ctrl+C to stop hopping.")
+		fmt.Printf("[+] Starting autonomous drone-side channel hopper across %v (Dwell: %dms)...\n", channels, hopDwellMs)
+		if err := client.StartHop(channels, hopDwellMs); err != nil {
+			fmt.Printf("[!] Drone rejected HOP_START: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("[+] Autonomous hopping active on drone. Press Ctrl+C to stop.")
 
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
-		ticker := time.NewTicker(time.Duration(hopDwellMs) * time.Millisecond)
-		defer ticker.Stop()
-
-		idx := 0
-		hopCount := 0
-
-		for {
-			select {
-			case <-sigCh:
-				fmt.Printf("\n[*] Channel hopper stopped. Total hops: %d\n", hopCount)
-				return
-			case <-ticker.C:
-				ch := channels[idx]
-				if err := client.SetChannel(ch); err == nil {
-					hopCount++
-					fmt.Printf("\r[+] Current Channel: %2d (Hop #%d)...", ch, hopCount)
-				}
-				idx = (idx + 1) % len(channels)
-			}
-		}
+		<-sigCh
+		fmt.Println("\n[*] Stopping autonomous channel hopping...")
+		_ = client.StopHop()
+		fmt.Println("[+] Channel hopper stopped.")
 	},
 }
 

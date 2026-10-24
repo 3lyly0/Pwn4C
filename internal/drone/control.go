@@ -329,3 +329,38 @@ func (c *ControlClient) Reboot() error {
 	}
 	return nil
 }
+
+// StartHop commands the drone to autonomously hop across channels with dwellMs
+func (c *ControlClient) StartHop(channels []int, dwellMs int) error {
+	params := map[string]interface{}{
+		"channels": channels,
+		"dwell_ms": dwellMs,
+	}
+	resp, err := c.SendCommand("HOP_START", params)
+	if err != nil {
+		return err
+	}
+	if strings.ToLower(resp.Status) != "ok" {
+		if resp.Error != nil {
+			return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+		}
+		return fmt.Errorf("failed to start channel hopping")
+	}
+	return nil
+}
+
+// StopHop commands the drone to stop autonomous channel hopping
+func (c *ControlClient) StopHop() error {
+	resp, err := c.SendCommand("HOP_STOP", nil)
+	if err != nil {
+		return err
+	}
+	if strings.ToLower(resp.Status) != "ok" {
+		if resp.Error != nil {
+			return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+		}
+		return fmt.Errorf("failed to stop channel hopping")
+	}
+	return nil
+}
+
