@@ -11,7 +11,7 @@
  *   it is split into two memcpy calls (ring is a circular byte array).
  *
  *   We use a simpler approach: individual frames are never larger than
- *   FRAME_SLOT_MAX bytes (2332).  Since RING_BYTES = 65536 >> FRAME_SLOT_MAX
+ *   FRAME_SLOT_MAX bytes (2332).  Since RING_BYTES = 524288 >> FRAME_SLOT_MAX
  *   we never need wrap-splitting: if (ring_head + slot_size) wraps, we
  *   drop the oldest frames until there is room, or skip this frame.
  *
@@ -200,6 +200,14 @@ int capture_open(daemon_t *d)
         util_log("capture", "bind AF_PACKET: %s", strerror(errno));
         close(fd);
         return -1;
+    }
+
+    /* §2.1: Expand kernel receive buffer to 256 KiB to absorb bursts */
+    {
+        int rcvbuf = 262144;
+        if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
+            util_log("capture", "SO_RCVBUF: %s (non-fatal)", strerror(errno));
+        }
     }
 
     d->pkt_fd = fd;

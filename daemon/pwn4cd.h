@@ -38,7 +38,7 @@
 #define PROTO_VERSION       1
 
 /* Ring-buffer capacity (bytes): must be power-of-two for mask trick */
-#define RING_BYTES          (64u * 1024u)   /* 64 KiB                        */
+#define RING_BYTES          (512u * 1024u)  /* 512 KiB — 8x burst headroom   */
 #define RING_MASK           (RING_BYTES - 1u)
 
 /* Per-frame slot inside the ring: 16-byte stream header + up to 2316 bytes  *
@@ -131,7 +131,7 @@ typedef struct {
     uint32_t     host_ip;               /* network byte order                 */
 
     /* Capture ring buffer (fixed, stack-allocated in main)                   */
-    uint8_t     *ring_buf;              /* pointer to 64KB static array       */
+    uint8_t     *ring_buf;              /* pointer to 512KB static array      */
     uint32_t     ring_head;             /* write cursor                       */
     uint32_t     ring_tail;             /* read cursor                        */
 
