@@ -12,6 +12,7 @@
 void run_json_tests(void);
 void run_stream_tests(void);
 void run_hex_tests(void);
+int run_bpf_tests(void);
 
 int main(void)
 {
@@ -24,6 +25,9 @@ int main(void)
     run_stream_tests();
     printf("\n");
     run_hex_tests();
+    printf("
+");
+    run_bpf_tests();
 
     printf("\n==============================================\n");
     printf("  All test suites completed.\n");
