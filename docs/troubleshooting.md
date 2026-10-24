@@ -150,27 +150,39 @@ ssh root@192.168.4.1 "logread | grep pwn4cd"
 
 **Fix:** Same as above. Fall back to Path B.
 
-### `busybox` is embedded — no router internet or host callback needed
+### Direct flash: router did not request the firmware
 
-`pwn4c infect` no longer downloads BusyBox from GitHub and no longer asks the
-router to connect back to a host TCP port for the shell stage. The uploaded
-`tar.gz` contains `speedtest_urls.xml`, `script.sh`, and the vendored
-`busybox-mipsel` binary. After `c_upload` extracts the archive to `/tmp`, the
-injected script runs `/tmp/busybox telnetd` directly.
+```
+[!] Infection failed: router did not request the firmware within 1m0s; ...
+```
 
-Consequences:
+**Cause:** The primary `--flash` path does not use BusyBox or an interactive
+shell. The uploaded tarball contains only `speedtest_urls.xml` and `script.sh`
+(a few KB). Success requires the injected script to connect back to the host's
+temporary TCP listener and request `firmware`. If that request never arrives,
+either the command injection did not run or the router could not reach the
+host listener.
 
-- The router does **not** need internet access.
-- The host does **not** need an inbound firewall rule or port forward.
-- The host starts a local TCP server only when `--flash` is used, to serve the
-  sysupgrade image. Without `--flash`, no callback listener is started.
-- A missing callback is not a failure. Success is decided by probing ports
-  23/22 after the trigger.
+**Fix:**
+1. Retry `pwn4c infect <ip> --flash <image>` once; the netspeed trigger is not
+   always deterministic.
+2. **Windows firewall:** allow `pwn4c.exe` on the **Private** network when
+   prompted, or allow the random TCP port printed by the CLI. Check
+   third-party firewalls too.
+3. **LAN:** the host must be on the router's LAN subnet
+   (`192.168.31.0/24` by default), connected to a **LAN** port (not WAN).
+   Try `ping 192.168.31.1` and open `http://192.168.31.1`.
+4. If the upload returned `1629` and the router never requests the firmware,
+   the firmware is probably patched. Downgrade to a vulnerable build or use
+   Path B.
 
-The BusyBox binary is vendored at
-`internal/exploit/assets/busybox-mipsel` and compiled into the CLI with
-`//go:embed`. If you build from a source checkout that lacks this file, place
-a compatible statically linked MIPSel BusyBox binary there before building.
+### `busybox` / `telnetd` / SSH are not used by the primary flash path
+
+The primary `--flash` path does not need BusyBox, dropbear, telnetd, or an
+interactive root shell. The payload is only XML + script, and the injected
+script fetches the sysupgrade image from the host and runs
+`mtd -r write /tmp/pwn4c.bin OS1`. A stock telnetd/dropbear attempt is made
+only when `--flash` is omitted (debug path).
 
 ### `router rejected archive: code=1629` (解压失败，可能文件已经损坏)
 
@@ -185,12 +197,27 @@ a compatible statically linked MIPSel BusyBox binary there before building.
 2. Downgrade to a vulnerable build (4C: `2.14.75`–`2.14.92`, or Global `3.0.23` per community reports), then re-run `pwn4c infect`. Note the stock web UI usually rejects downgrade images at file-check, so use the Xiaomi Repair Tool / `mtd write` route (see OpenWrt wiki for the 4C) or UART.
 3. Alternatively try a newer exploit primitive for your model/firmware (e.g. the `get_icon` vector used by community patcher tools), or fall back to Path B (TFTP/UART flash).
 
-**Note:** `pwn4c infect` deliberately does not abort on `1629` — it still runs the `netspeed` trigger and then verifies ports 23/22, so a partially-working target still gets detected. `code=1629` is not necessarily fatal: some firmware extracts and executes the archive anyway.
+**Note:** `pwn4c infect` deliberately does not abort on `1629` — it still runs the `netspeed` trigger. On the `--flash` path, success is decided by whether the router requests the firmware and completes the transfer, not by ports 22/23.
 
-### `telnet (23) and ssh (22) are both closed`
+### `router rejected archive: code=1630` (payload too large)
 
-`infect` treats this as the final failure because the embedded BusyBox telnetd
-did not come up. BusyBox delivery itself is not the problem anymore, so check:
+```
+[!] Infection failed: payload too large: router rejected the <n>-byte archive with code=1630 ...
+```
+
+**Cause:** `c_upload` rejected the archive because it exceeded the router's size
+limit. With the current XML + script payload (a few KB) this should not happen;
+it usually means a build accidentally re-added binaries or a different archive
+was uploaded. The CLI also enforces a local 100 KB safety limit.
+
+**Fix:** Rebuild the CLI from current sources and confirm the `payload size=`
+log is a few KB. Do not embed BusyBox, dropbear, or the firmware image in the
+tarball.
+
+### Stock shell path: `telnet (23) and ssh (22) are both closed`
+
+This only applies when `--flash` is **not** provided. The primary flash path
+does not depend on these ports. If the stock shell path fails, check:
 
 1. **Patched firmware** — the upload or command-injection vector is closed
    (China `2.14.502`, some 4A Gigabit builds). Downgrade to a vulnerable build
@@ -215,19 +242,22 @@ nc -vz 192.168.31.1 23
 nc -vz 192.168.31.1 22
 ```
 
-### `SSH connection refused after injection`
+### Stock shell path: `SSH connection refused after injection`
 
 ```
 [+] Command injection successful. SSH enabled.
 [!] SSH connection to 192.168.31.1:22 refused.
 ```
 
-**Cause:** The injected payload executed, but the SSH/telnet daemon failed to start. BusyBox is embedded in the archive, so this is not a download/callback problem. Possible reasons: insufficient `/tmp` space to extract the ~1.6 MB binary, a modified init system that blocks new services, or a busybox/telnetd incompatibility on the target firmware.
+**Cause:** The optional stock-shell path ran, but the stock SSH/telnet daemon
+failed to start. The primary `--flash` path does not use these daemons.
+Possible reasons: stock dropbear is disabled or missing, `/tmp` is full, or the
+init system blocks new services.
 
 **Fix:**
-1. Retry `pwn4c infect` once. The injection is not always deterministic.
-2. If it persists, attempt a manual telnet connection: `telnet 192.168.31.1`. If telnet works but SSH does not, use telnet to manually upload and flash the firmware.
-3. If neither works, use Path B.
+1. Use `--flash` for deployment.
+2. Retry `pwn4c infect <ip>` once. The injection is not always deterministic.
+3. If you need a debug shell, try `telnet 192.168.31.1`; otherwise use Path B.
 
 ### `mtd write failed`
 

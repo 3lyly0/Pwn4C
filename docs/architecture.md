@@ -69,7 +69,7 @@ The Drone performs zero frame analysis. It is a dumb RF transceiver controlled e
 
 ## Automated Infection Lifecycle
 
-The Go client includes a built-in `infect` command that converts a stock Xiaomi Mi Router 4C into a Pwn4C Drone in a single step. This leverages the CVE-2019-18370 and CVE-2019-18371 exploit chain (command injection in the stock Xiaomi web interface).
+The Go client includes a built-in `infect` command that converts a stock Xiaomi Mi Router 4C into a Pwn4C Drone in a single step. This leverages the CVE-2019-18370 and CVE-2019-18371 exploit chain (command injection in the stock Xiaomi web interface). The primary path is a direct air-gapped flash: no BusyBox, dropbear, or interactive shell is required.
 
 ### Exploit Flow
 
@@ -79,19 +79,18 @@ Host                                    Stock Xiaomi Router 4C
   |-- 1. HTTP request to web API ---------------->|  (CVE-2019-18371: config download)
   |<------------- stok token + config ------------|
   |                                                |
-  |-- 2. Inject payload via stok endpoint ------->|  (CVE-2019-18370: command injection)
-  |   (enables telnet/SSH on the router)           |
+  |-- 2. Upload small tar.gz + trigger ---------->|  (CVE-2019-18370: command injection)
+  |   (speedtest_urls.xml + script.sh only)        |
   |                                                |
-  |-- 3. SSH/Telnet session ---------------------->|
-  |   Upload pwn4c-firmware.bin to /tmp            |
+  |<-- 3. Router requests "firmware" --------------|  (injected script)
+  |-- 4. Stream sysupgrade.bin ------------------->|
   |                                                |
-  |-- 4. Execute: mtd write /tmp/pwn4c-firmware.bin OS1 -->|
+  |                                                |  5. mtd -r write /tmp/pwn4c.bin OS1
+  |                                                |  6. reboot into Pwn4C OS
   |                                                |
-  |-- 5. Execute: reboot ------------------------->|
-  |                                                |
-  |   (Host polls for Drone on UDP :4440)          |
-  |                                                |
-  |<-- 6. ANNOUNCE (Drone is online) --------------|
+  |   (Host reconnects on 192.168.4.0/24)          |
+  |-- 7. pwn4c discover / UDP :4440 -------------->|
+  |<-- 8. ANNOUNCE (Drone is online) --------------|
   |                                                |
   |   [INFECTION COMPLETE]                         |
 ```
@@ -99,11 +98,11 @@ Host                                    Stock Xiaomi Router 4C
 ### Steps in Detail
 
 1. **Credential extraction**: The client sends an HTTP request to the router's web API, exploiting CVE-2019-18371 to extract the `stok` authentication token and device configuration.
-2. **Command injection**: Using the `stok` token, the client injects a shell command via CVE-2019-18370 that enables telnet or SSH access on the router. The uploaded tarball embeds a `busybox-mipsel` binary, so the router needs no internet access and the host needs no inbound callback port for this stage.
-3. **Firmware upload**: With `--flash`, the client opens an SSH (or telnet) session and uploads the Pwn4C OpenWrt firmware binary to `/tmp` on the router. The optional firmware server is the only reason `infect` opens a local TCP listener.
-4. **Flash write**: The client executes `mtd write /tmp/pwn4c-firmware.bin OS1` to overwrite the operating system partition. The factory calibration partition is not touched.
-5. **Reboot**: The client issues `reboot`. The router boots into the Pwn4C OpenWrt image.
-6. **Verification**: The client begins broadcasting UDP discovery packets on port 4440. Once the Drone responds with an `ANNOUNCE` packet, infection is confirmed.
+2. **Command injection**: Using the `stok` token, the client uploads a small `tar.gz` containing only `speedtest_urls.xml` and `script.sh`, then triggers the poisoned netspeed request via CVE-2019-18370. No router-side binaries are embedded and no shell session is opened.
+3. **Firmware fetch**: The injected script connects back to the host's temporary TCP server and requests `firmware`. The host streams the sysupgrade image; the router needs no internet access.
+4. **Flash write**: The script verifies the image is non-empty and runs `mtd -r write /tmp/pwn4c.bin OS1`, overwriting the operating system partition. The factory calibration partition is not touched.
+5. **Reboot**: `mtd -r` reboots the router into the Pwn4C OpenWrt image on `192.168.4.0/24`.
+6. **Verification**: After reconnecting to the Drone network, the client broadcasts UDP discovery packets on port 4440. Once the Drone responds with an `ANNOUNCE` packet, infection is confirmed.
 
 The entire process takes 60-90 seconds on a typical network.
 
@@ -111,6 +110,7 @@ The entire process takes 60-90 seconds on a typical network.
 
 - The target router must be running **stock Xiaomi firmware** vulnerable to CVE-2019-18370/18371.
 - The Host must be on the same LAN segment as the router (connected via Ethernet or Wi-Fi to the router's network).
+- With `--flash`, the host firewall must allow inbound TCP on the temporary firmware port printed by the CLI (allow `pwn4c.exe` on Windows Private networks).
 - Routers with patched firmware require manual flashing via TFTP or UART (see [installation.md](installation.md#path-b-manual-build-and-advanced-installation)).
 
 ---

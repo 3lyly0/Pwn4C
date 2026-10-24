@@ -36,11 +36,15 @@ var infectCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		fmt.Println("[+] Infection complete.")
+		if infectFirmwarePath != "" {
+			fmt.Println("[+] Flash transfer complete. Router should reboot into Pwn4C OS on 192.168.4.1.")
+		} else {
+			fmt.Println("[+] Infection complete.")
+		}
 	},
 }
 
 func init() {
-	infectCmd.Flags().StringVarP(&infectFirmwarePath, "flash", "f", "", "Optional path to Pwn4C sysupgrade.bin to automatically flash to OS1")
+	infectCmd.Flags().StringVarP(&infectFirmwarePath, "flash", "f", "", "Path to Pwn4C sysupgrade.bin for direct air-gapped flash to OS1 (primary deployment path)")
 	rootCmd.AddCommand(infectCmd)
 }
