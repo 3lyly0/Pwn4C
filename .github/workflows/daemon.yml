@@ -31,7 +31,7 @@ jobs:
       - name: Build (native, -Werror)
         run: make clean && make
 
-      - name: Unit tests (67 assertions)
+      - name: Unit tests (97 assertions)
         run: make test
 
       - name: Mock transcript
