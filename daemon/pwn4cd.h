@@ -143,6 +143,8 @@ typedef struct {
     int          stream_fd;             /* UDP tx socket for :5555            */
     int          pkt_fd;                /* AF_PACKET raw capture socket (-1)  */
     int          tx_fd;                 /* AF_PACKET injection socket (-1)    */
+    int          nl_fd;                 /* persistent Generic Netlink (-1)     */
+    int          nl_family_id;          /* cached nl80211 family id (-1)       */
 
     /* Non-blocking frame injection queue (§3.3) */
     tx_queue_t   tx_q;
@@ -221,6 +223,7 @@ int     radio_set_channel(daemon_t *d, int channel);
 int     radio_set_txpower(daemon_t *d, int dbm);
 int     radio_set_mac(daemon_t *d, const uint8_t mac[6]);
 int     radio_restore_normal(daemon_t *d);
+void    radio_netlink_close(daemon_t *d);
 
 /* capture.c */
 int     capture_open(daemon_t *d);

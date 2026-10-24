@@ -86,6 +86,8 @@ int main(int argc, char *argv[])
     g_daemon.stream_fd       = -1;
     g_daemon.pkt_fd          = -1;
     g_daemon.tx_fd           = -1;
+    g_daemon.nl_fd           = -1;
+    g_daemon.nl_family_id    = -1;
     g_daemon.state           = STATE_IDLE;
     g_daemon.radio_mode      = RADIO_DOWN;
     g_daemon.channel         = 1;
