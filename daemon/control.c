@@ -144,11 +144,12 @@ static void send_error(daemon_t *d, const char *id,
 
 static void cmd_get_status(daemon_t *d, const char *id)
 {
-    char data[512];
-    char drone_id[32];
-    int  cpu_temp = 0;
-    int64_t free_ram = 0;
-    int  uptime;
+    char     data[768];
+    char     drone_id[32];
+    int      cpu_temp = 0;
+    int64_t  free_ram = 0;
+    int      uptime;
+    uint32_t kernel_drops = 0;
 
     (void)snprintf(drone_id, sizeof(drone_id), "pwn4c-%02x%02x",
                    d->base_mac[4], d->base_mac[5]);
@@ -156,6 +157,7 @@ static void cmd_get_status(daemon_t *d, const char *id)
     util_cpu_temp(&cpu_temp);
     util_free_ram_bytes(&free_ram);
     uptime = (int)(util_monotonic_sec() - d->start_sec);
+    (void)capture_get_kernel_drops(d, &kernel_drops);
 
     (void)snprintf(data, sizeof(data),
         "{"
@@ -168,7 +170,12 @@ static void cmd_get_status(daemon_t *d, const char *id)
         "\"cpu_temp_celsius\":%d,"
         "\"free_ram_bytes\":%lld,"
         "\"firmware_version\":\"%s\","
-        "\"drone_id\":\"%s\""
+        "\"drone_id\":\"%s\","
+        "\"rx_frames\":%llu,"
+        "\"tx_frames\":%llu,"
+        "\"ring_overruns\":%llu,"
+        "\"inject_failures\":%llu,"
+        "\"kernel_drops\":%lu"
         "}",
         d->state == STATE_MONITORING || d->state == STATE_INJECTING
             ? "monitor" : "idle",
@@ -179,7 +186,12 @@ static void cmd_get_status(daemon_t *d, const char *id)
         cpu_temp,
         (long long)free_ram,
         DAEMON_VERSION,
-        drone_id
+        drone_id,
+        (unsigned long long)d->frames_captured,
+        (unsigned long long)d->stream_seq,
+        (unsigned long long)d->ring_overruns,
+        (unsigned long long)d->inject_failures,
+        (unsigned long)kernel_drops
     );
     send_ok(d, id, data);
 }
@@ -443,6 +455,8 @@ static void cmd_send_injection(daemon_t *d, const char *id, const char *params)
 
         if (ok) { sent++; } else { failed++; }
     }
+
+    d->inject_failures += (uint64_t)failed;
 
     d->state = STATE_MONITORING;
 

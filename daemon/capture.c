@@ -98,6 +98,7 @@ static void ring_drop_one_slot(daemon_t *d)
         d->ring_tail = (tail + slot_sz) & RING_MASK;
     }
     d->frames_dropped++;
+    d->ring_overruns++;
 }
 
 /*
@@ -318,4 +319,24 @@ int capture_ring_pop(daemon_t *d, uint8_t *buf, size_t bufsize,
     d->ring_tail   = tail;
     *frame_len_out = hdr.frame_bytes;
     return (int)hdr.frame_bytes;
+}
+
+/* §2.4: Query kernel PACKET_STATISTICS for hardware-level drop counter.
+ * Returns kernel drop count, or -1 if unavailable. */
+int capture_get_kernel_drops(daemon_t *d, uint32_t *tp_drops_out)
+{
+    struct tpacket_stats stats;
+    socklen_t            slen = sizeof(stats);
+
+    if (!tp_drops_out) { return -1; }
+    *tp_drops_out = 0;
+
+    if (d->mock_mode || d->pkt_fd < 0) { return 0; }
+
+    if (getsockopt(d->pkt_fd, SOL_PACKET, PACKET_STATISTICS,
+                   &stats, &slen) < 0) {
+        return -1;
+    }
+    *tp_drops_out = stats.tp_drops;
+    return 0;
 }

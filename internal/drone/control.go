@@ -37,6 +37,11 @@ type StatusData struct {
 	FreeRAMBytes    int64  `json:"free_ram_bytes"`
 	FirmwareVersion string `json:"firmware_version"`
 	DroneID         string `json:"drone_id"`
+	RxFrames        uint64 `json:"rx_frames"`
+	TxFrames        uint64 `json:"tx_frames"`
+	RingOverruns    uint64 `json:"ring_overruns"`
+	InjectFailures  uint64 `json:"inject_failures"`
+	KernelDrops     uint32 `json:"kernel_drops"`
 }
 
 // DiagnosticsData represents system health in GET_DIAGNOSTICS

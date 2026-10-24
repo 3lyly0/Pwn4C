@@ -62,6 +62,11 @@ var statusCmd = &cobra.Command{
 		fmt.Printf(" CPU Temp        : %d °C\n", st.CPUTempCelsius)
 		fmt.Printf(" Free RAM        : %d MB\n", st.FreeRAMBytes/(1024*1024))
 		fmt.Printf(" TX Queue        : %d / %d\n", st.TxQueueDepth, st.TxQueueMax)
+		fmt.Printf(" RX Frames       : %d\n", st.RxFrames)
+		fmt.Printf(" TX Frames       : %d\n", st.TxFrames)
+		fmt.Printf(" Ring Overruns   : %d\n", st.RingOverruns)
+		fmt.Printf(" Inject Failures : %d\n", st.InjectFailures)
+		fmt.Printf(" Kernel Drops    : %d\n", st.KernelDrops)
 		fmt.Println("==================================================")
 	},
 }
