@@ -77,7 +77,15 @@ jobs:
       - name: Build Binary
         run: |
           mkdir -p dist
-          go build -ldflags="-s -w" -o "dist/${{ matrix.bin }}" ./cmd/pwn4c
+          # Tags give a clean version; branch builds get a dev marker so a
+          # released binary is always distinguishable from a CI snapshot.
+          VERSION="${{ github.ref_name }}"
+          case "$VERSION" in
+            v*) ;;
+            *) VERSION="dev-$(git rev-parse --short HEAD)" ;;
+          esac
+          go build -ldflags="-s -w -X github.com/3lyly0/Pwn4C/cmd/pwn4c/cmd.Version=$VERSION" -o "dist/${{ matrix.bin }}" ./cmd/pwn4c
+          "dist/${{ matrix.bin }}" --version || true
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4

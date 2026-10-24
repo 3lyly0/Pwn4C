@@ -10,12 +10,20 @@ import (
 
 var globalPSK string
 
+// Version is the CLI version. Release builds inject it with
+//
+//	go build -ldflags "-X github.com/3lyly0/Pwn4C/cmd/pwn4c/cmd.Version=v1.1.0"
+//
+// Local builds report "dev".
+var Version = "dev"
+
 var rootCmd = &cobra.Command{
 	Use:   "pwn4c",
 	Short: "Pwn4C: Offensive Wi-Fi Drone Management Framework",
 	Long: `Pwn4C converts a Xiaomi Mi Router 4C (MediaTek MT7628N) into a headless
 Wi-Fi penetration testing implant. It provides orchestration for deployment,
 discovery, channel monitoring, and control channel telemetry.`,
+	Version: Version,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		if globalPSK != "" {
 			drone.DefaultPSK = globalPSK
@@ -33,4 +41,8 @@ func Execute() {
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&globalPSK, "psk", "", "Pre-shared key for HMAC-SHA256 control channel authentication (or set PWN4C_PSK)")
+
+	// Keep the version advertised in DISCOVER packets in sync with the binary.
+	drone.ClientVersion = Version
+	rootCmd.SetVersionTemplate("pwn4c {{.Version}}\n")
 }
