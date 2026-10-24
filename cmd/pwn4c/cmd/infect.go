@@ -10,9 +10,11 @@ import (
 	"golang.org/x/term"
 )
 
+var infectFirmwarePath string
+
 var infectCmd = &cobra.Command{
 	Use:   "infect [target_ip]",
-	Short: "Automates deployment on a stock Xiaomi Mi Router 4C",
+	Short: "Automates deployment on a stock Xiaomi Mi Router 4C (air-gapped capable)",
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		targetIP := args[0]
@@ -29,15 +31,16 @@ var infectCmd = &cobra.Command{
 
 		password := strings.TrimSpace(string(bytePassword))
 
-		if err := exploit.RunInfection(targetIP, password); err != nil {
+		if err := exploit.RunInfection(targetIP, password, infectFirmwarePath); err != nil {
 			fmt.Printf("[!] Infection failed: %v\n", err)
 			os.Exit(1)
 		}
 
-		fmt.Println("[+] Infection complete. Router is accessible via SSH.")
+		fmt.Println("[+] Infection complete.")
 	},
 }
 
 func init() {
+	infectCmd.Flags().StringVarP(&infectFirmwarePath, "flash", "f", "", "Optional path to Pwn4C sysupgrade.bin to automatically flash to OS1")
 	rootCmd.AddCommand(infectCmd)
 }
