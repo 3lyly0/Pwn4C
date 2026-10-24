@@ -179,12 +179,12 @@ func (r *FrameReceiver) readLoop(onFrame func(seq uint32, frame []byte)) {
 			}
 		}
 
-		seq       := binary.BigEndian.Uint32(buf[0:4])
-		tsLo32    := binary.BigEndian.Uint32(buf[4:8])
-		_          = binary.BigEndian.Uint16(buf[8:10])  // fragIdx (tracked via entry.got)
+		seq := binary.BigEndian.Uint32(buf[0:4])
+		tsLo32 := binary.BigEndian.Uint32(buf[4:8])
+		_ = binary.BigEndian.Uint16(buf[8:10]) // fragIdx (tracked via entry.got)
 		fragCount := binary.BigEndian.Uint16(buf[10:12])
-		frameLen  := binary.BigEndian.Uint16(buf[12:14])
-		tsHi16    := binary.BigEndian.Uint16(buf[14:16])
+		frameLen := binary.BigEndian.Uint16(buf[12:14])
+		tsHi16 := binary.BigEndian.Uint16(buf[14:16])
 		// Reconstruct 48-bit µs timestamp
 		tsUS48 := (uint64(tsHi16) << 32) | uint64(tsLo32)
 		payload := buf[StreamHeaderLen:n]
