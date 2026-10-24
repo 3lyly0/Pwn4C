@@ -102,7 +102,7 @@ int stream_send_next(daemon_t *d)
     uint16_t          frame_len;
     int               r;
     uint32_t          ts_us;
-    int64_t           now_us;
+    uint16_t          ts_hi16;
     int64_t           start_us;
     uint32_t          seq;
     uint16_t          frag_count;
@@ -116,11 +116,17 @@ int stream_send_next(daemon_t *d)
     r = capture_ring_pop(d, frame_buf, sizeof(frame_buf), &frame_len);
     if (r <= 0) { return r; }
 
-    /* Compute timestamp_us: integer µs since monitor start, wraps at 2^32 */
-    now_us   = util_monotonic_us();
-    start_us = d->monitor_start_sec * 1000000LL
-             + (int64_t)(d->monitor_start_nsec / 1000);
-    ts_us    = (uint32_t)((now_us - start_us) & 0xFFFFFFFFu);
+    /* §2.2: 48-bit monotonic µs timestamp (no rollover for 8.9 years)      *
+     * Lower 32 bits → bytes 4-7; upper 16 bits → bytes 14-15 (timestamp_hi16) */
+    {
+        int64_t elapsed_us;
+        start_us = d->monitor_start_sec * 1000000LL
+                 + (int64_t)(d->monitor_start_nsec / 1000);
+        elapsed_us = util_monotonic_us() - start_us;
+        if (elapsed_us < 0) { elapsed_us = 0; }
+        ts_us      = (uint32_t)(elapsed_us & 0xFFFFFFFFu);
+        ts_hi16    = (uint16_t)((elapsed_us >> 32) & 0xFFFFu);
+    }
 
     seq = d->stream_seq++;
 
@@ -153,7 +159,7 @@ int stream_send_next(daemon_t *d)
         put_u16_be(hdrp + 8,  frag_idx);
         put_u16_be(hdrp + 10, frag_count);
         put_u16_be(hdrp + 12, frame_len);
-        put_u16_be(hdrp + 14, 0);  /* reserved = 0 */
+        put_u16_be(hdrp + 14, ts_hi16); /* timestamp_hi16 (48-bit ts upper 16) */
 
         memcpy(sg_send_buf + STREAM_HDR_LEN, frame_buf + offset, payload_len);
 

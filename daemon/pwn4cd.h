@@ -86,12 +86,12 @@ typedef enum {
 /* ── Stream datagram header (network byte order = big-endian) ─────────────── */
 /* Matches api_reference.md §UDP Frame Stream Format exactly.                 */
 typedef struct __attribute__((packed)) {
-    uint32_t seq_num;       /* monotonically increasing, wraps at 2^32       */
-    uint32_t timestamp_us;  /* µs since START_MONITOR, wraps ~71.6 min       */
-    uint16_t frag_index;    /* 0-based                                        */
-    uint16_t frag_count;    /* 1 = unfragmented                               */
-    uint16_t frame_len;     /* total reassembled frame length                 */
-    uint16_t reserved;      /* must be zero                                   */
+    uint32_t seq_num;         /* monotonically increasing, wraps at 2^32       */
+    uint32_t timestamp_lo32;  /* lower 32 bits of µs since START_MONITOR       */
+    uint16_t frag_index;      /* 0-based                                        */
+    uint16_t frag_count;      /* 1 = unfragmented                               */
+    uint16_t frame_len;       /* total reassembled frame length                 */
+    uint16_t timestamp_hi16;  /* upper 16 bits of 48-bit µs timestamp          */
 } stream_hdr_t;
 
 /* ── Ring-buffer slot header ──────────────────────────────────────────────── */
