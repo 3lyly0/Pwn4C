@@ -147,6 +147,12 @@ typedef struct {
     /* Non-blocking frame injection queue (§3.3) */
     tx_queue_t   tx_q;
 
+    /* Classic BPF kernel filter state (§3.4) */
+    bool         filter_active;
+    bool         filter_mgmt_only;
+    bool         filter_bssid_set;
+    uint8_t      filter_bssid[6];
+
     /* Peer address (filled from TCP connect, used for stream UDP target)     */
     uint32_t     host_ip;               /* network byte order                 */
 
@@ -221,6 +227,7 @@ int     capture_open(daemon_t *d);
 void    capture_close(daemon_t *d);
 int     capture_read_frame(daemon_t *d);   /* returns 1=frame queued, 0=none, -1=err */
 int     capture_get_kernel_drops(daemon_t *d, uint32_t *tp_drops_out);
+int     capture_set_filter(daemon_t *d, bool mgmt_only, const uint8_t *bssid);
 
 /* stream.c */
 int     stream_open(daemon_t *d);

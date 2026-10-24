@@ -33,6 +33,7 @@
 #include <arpa/inet.h>
 #include <linux/if_packet.h>
 #include <linux/if_ether.h>
+#include <linux/filter.h>
 #include <time.h>
 
 /* Synthetic mock frame: minimal RadioTap + 802.11 beacon stub.              */
@@ -214,6 +215,12 @@ int capture_open(daemon_t *d)
     d->pkt_fd = fd;
     util_log("capture", "AF_PACKET socket bound to %s (fd=%d)",
              d->wlan_iface, fd);
+
+    /* Attach BPF frame filter if configured (§3.4) */
+    if (d->filter_active) {
+        (void)capture_set_filter(d, d->filter_mgmt_only,
+                                 d->filter_bssid_set ? d->filter_bssid : NULL);
+    }
     return 0;
 }
 
@@ -223,6 +230,102 @@ void capture_close(daemon_t *d)
         close(d->pkt_fd);
         d->pkt_fd = -1;
     }
+}
+
+/*
+ * capture_set_filter — Attach classic BPF bytecode filter to AF_PACKET socket (§3.4).
+ * Filters by frame type (mgmt_only) and/or target BSSID.
+ */
+int capture_set_filter(daemon_t *d, bool mgmt_only, const uint8_t *bssid)
+{
+    struct sock_filter insns[32];
+    unsigned short     pc = 0;
+    struct sock_fprog  prog;
+
+    d->filter_mgmt_only = mgmt_only;
+    if (bssid) {
+        memcpy(d->filter_bssid, bssid, 6);
+        d->filter_bssid_set = true;
+    } else {
+        d->filter_bssid_set = false;
+        memset(d->filter_bssid, 0, 6);
+    }
+    d->filter_active = mgmt_only || d->filter_bssid_set;
+
+    if (!d->filter_active) {
+        /* Filter disabled / reset: accept all frames */
+        if (!d->mock_mode && d->pkt_fd >= 0) {
+            int dummy = 0;
+            (void)setsockopt(d->pkt_fd, SOL_SOCKET, SO_DETACH_FILTER, &dummy, sizeof(dummy));
+        }
+        util_log("capture", "BPF filter detached (all frames accepted)");
+        return 0;
+    }
+
+    /*
+     * Build Classic BPF Filter for RadioTap + IEEE 802.11:
+     * RadioTap header length is at byte offset 2 (uint16 little-endian).
+     * Load byte 2 into accumulator A, copy to X.
+     * X now points to IEEE 802.11 header start.
+     */
+    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 2);
+    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_MISC | BPF_TAX, 0);
+
+    if (mgmt_only && !d->filter_bssid_set) {
+        /* Load Frame Control byte 0: packet[X + 0] */
+        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_B | BPF_IND, 0);
+        /* Mask Type bits: FC & 0x0C */
+        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_ALU | BPF_AND | BPF_K, 0x0c);
+        /* If Type == 0x00 (Management), accept */
+        insns[pc++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x00, 0, 1);
+        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, 65535);
+        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, 0);
+    } else if (mgmt_only && d->filter_bssid_set) {
+        uint32_t bssid_hi = ((uint32_t)d->filter_bssid[0] << 24)
+                          | ((uint32_t)d->filter_bssid[1] << 16)
+                          | ((uint32_t)d->filter_bssid[2] << 8)
+                          |  (uint32_t)d->filter_bssid[3];
+        uint32_t bssid_lo = ((uint32_t)d->filter_bssid[4] << 8)
+                          |  (uint32_t)d->filter_bssid[5];
+
+        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_B | BPF_IND, 0);
+        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_ALU | BPF_AND | BPF_K, 0x0c);
+        insns[pc++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x00, 0, 5);
+        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_IND, 16);
+        insns[pc++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, bssid_hi, 0, 3);
+        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_H | BPF_IND, 20);
+        insns[pc++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, bssid_lo, 0, 1);
+        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, 65535);
+        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, 0);
+    } else if (d->filter_bssid_set) {
+        uint32_t bssid_hi = ((uint32_t)d->filter_bssid[0] << 24)
+                          | ((uint32_t)d->filter_bssid[1] << 16)
+                          | ((uint32_t)d->filter_bssid[2] << 8)
+                          |  (uint32_t)d->filter_bssid[3];
+        uint32_t bssid_lo = ((uint32_t)d->filter_bssid[4] << 8)
+                          |  (uint32_t)d->filter_bssid[5];
+
+        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_IND, 16);
+        insns[pc++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, bssid_hi, 0, 3);
+        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_H | BPF_IND, 20);
+        insns[pc++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, bssid_lo, 0, 1);
+        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, 65535);
+        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, 0);
+    }
+
+    prog.len = pc;
+    prog.filter = insns;
+
+    if (!d->mock_mode && d->pkt_fd >= 0) {
+        if (setsockopt(d->pkt_fd, SOL_SOCKET, SO_ATTACH_FILTER, &prog, sizeof(prog)) < 0) {
+            util_log("capture", "SO_ATTACH_FILTER: %s", strerror(errno));
+            return -1;
+        }
+    }
+
+    util_log("capture", "BPF filter attached (%u insns, mgmt_only=%d, bssid_set=%d)",
+             pc, (int)mgmt_only, (int)d->filter_bssid_set);
+    return 0;
 }
 
 /*
@@ -240,6 +343,13 @@ int capture_read_frame(daemon_t *d)
     ssize_t        n;
 
     if (d->mock_mode) {
+        /* In mock mode, check BSSID filter against synthetic mock frame */
+        if (d->filter_bssid_set) {
+            static const uint8_t mock_bssid[6] = {0x02, 0x00, 0x00, 0xde, 0xad, 0x01};
+            if (memcmp(d->filter_bssid, mock_bssid, 6) != 0) {
+                return 0;
+            }
+        }
         /* Generate one synthetic frame (caller throttles rate) */
         if (MOCK_FRAME_LEN > FRAME_SLOT_MAX - sizeof(slot_hdr_t)) {
             return -1;

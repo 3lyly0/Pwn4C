@@ -367,6 +367,113 @@ Switches the radio to a different channel while monitor mode is active.
 
 ---
 
+#### `HOP_START`
+
+Starts autonomous channel hopping directly inside the daemon event loop without requiring host-side control polling.
+
+**Request:**
+
+```json
+{
+  "id": "cmd-005",
+  "command": "HOP_START",
+  "params": {
+    "channels": [1, 6, 11],
+    "dwell_ms": 250
+  }
+}
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `channels` | integer[] | No | Array of channels (1-13) to cycle through (defaults to 1-13) |
+| `dwell_ms` | integer | No | Time to dwell on each channel in milliseconds (default: 250) |
+
+**Response:**
+
+```json
+{
+  "id": "cmd-005",
+  "status": "ok",
+  "data": {
+    "hop_active": true,
+    "dwell_ms": 250,
+    "channel_count": 3,
+    "current_channel": 1
+  }
+}
+```
+
+---
+
+#### `HOP_STOP`
+
+Stops autonomous channel hopping on the drone.
+
+**Request:**
+
+```json
+{
+  "id": "cmd-006",
+  "command": "HOP_STOP",
+  "params": {}
+}
+```
+
+**Response:**
+
+```json
+{
+  "id": "cmd-006",
+  "status": "ok",
+  "data": {
+    "hop_active": false,
+    "channel": 1
+  }
+}
+```
+
+---
+
+#### `SET_FILTER`
+
+Attaches a classic BPF bytecode filter to the packet capture socket (`SO_ATTACH_FILTER`) to filter by frame type and/or target BSSID in the Linux kernel before packets enter userspace.
+
+**Request:**
+
+```json
+{
+  "id": "cmd-007",
+  "command": "SET_FILTER",
+  "params": {
+    "mgmt_only": true,
+    "bssid": "00:11:22:33:44:55"
+  }
+}
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `mgmt_only` | boolean | No | Pass only 802.11 management frames (beacons, probe req/resp, deauth) |
+| `bssid` | string | No | Filter frames matching specified BSSID MAC address |
+| `reset` | boolean | No | When true, detaches BPF filter and accepts all frames |
+
+**Response:**
+
+```json
+{
+  "id": "cmd-007",
+  "status": "ok",
+  "data": {
+    "filter_active": true,
+    "mgmt_only": true,
+    "bssid_filtered": true
+  }
+}
+```
+
+---
+
 #### `SEND_INJECTION`
 
 Transmits a raw 802.11 frame on the current channel.
