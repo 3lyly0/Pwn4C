@@ -36,22 +36,28 @@
 static char s_linebuf[JSON_BUF_LEN];
 static int  s_linelen;
 
-/* ── Injection TX socket (AF_PACKET) ─────────────────────────────────────── */
-static int  s_tx_fd = -1;
+/* ── Non-blocking Injection TX socket (AF_PACKET) (§3.3) ────────────────── */
 
 static int tx_open(daemon_t *d)
 {
     struct sockaddr_ll sll;
     struct ifreq       ifr;
     int                fd;
+    int                flags;
 
-    if (s_tx_fd >= 0) { return 0; }
+    if (d->tx_fd >= 0) { return 0; }
     if (d->mock_mode) { return 0; }
 
     fd = socket(AF_PACKET, SOCK_RAW | SOCK_CLOEXEC, htons(ETH_P_ALL));
     if (fd < 0) {
         util_log("inject", "socket(AF_PACKET): %s", strerror(errno));
         return -1;
+    }
+
+    /* Set non-blocking mode on injection socket */
+    flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) {
+        (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
     }
 
     memset(&ifr, 0, sizeof(ifr));
@@ -73,16 +79,66 @@ static int tx_open(daemon_t *d)
         return -1;
     }
 
-    s_tx_fd = fd;
+    d->tx_fd = fd;
     return 0;
 }
 
-static void tx_close(void)
+static void tx_close(daemon_t *d)
 {
-    if (s_tx_fd >= 0) {
-        close(s_tx_fd);
-        s_tx_fd = -1;
+    if (d->tx_fd >= 0) {
+        close(d->tx_fd);
+        d->tx_fd = -1;
     }
+    memset(&d->tx_q, 0, sizeof(d->tx_q));
+}
+
+/*
+ * tx_queue_drain_step — Drain one frame from the TX queue non-blockingly.
+ * Returns 1 on frame transmitted, 0 if queue empty or socket full, -1 on drop.
+ */
+int tx_queue_drain_step(daemon_t *d)
+{
+    tx_slot_t *slot;
+    ssize_t    n;
+
+    if (d->tx_q.count == 0) { return 0; }
+
+    slot = &d->tx_q.slots[d->tx_q.tail];
+
+    if (d->mock_mode) {
+        d->tx_q.tail = (d->tx_q.tail + 1u) % TX_QUEUE_MAX;
+        d->tx_q.count--;
+        return 1;
+    }
+
+    if (d->tx_fd < 0) { return -1; }
+
+    do {
+        n = send(d->tx_fd, slot->frame, slot->len, MSG_DONTWAIT);
+    } while (n < 0 && errno == EINTR);
+
+    if (n >= 0) {
+        d->tx_q.tail = (d->tx_q.tail + 1u) % TX_QUEUE_MAX;
+        d->tx_q.count--;
+        return 1;
+    }
+
+    if (errno == ENOBUFS || errno == EAGAIN || errno == EWOULDBLOCK) {
+        slot->retries++;
+        if (slot->retries > TX_RETRY_COUNT) {
+            d->inject_failures++;
+            d->tx_q.tail = (d->tx_q.tail + 1u) % TX_QUEUE_MAX;
+            d->tx_q.count--;
+            return -1;
+        }
+        return 0;
+    }
+
+    /* Unrecoverable error */
+    d->inject_failures++;
+    d->tx_q.tail = (d->tx_q.tail + 1u) % TX_QUEUE_MAX;
+    d->tx_q.count--;
+    return -1;
 }
 
 /* ── Hex decode helper ────────────────────────────────────────────────────── */
@@ -164,8 +220,8 @@ static void cmd_get_status(daemon_t *d, const char *id)
         "\"state\":\"%s\","
         "\"channel\":%d,"
         "\"monitor_active\":%s,"
-        "\"tx_queue_depth\":0,"
-        "\"tx_queue_max\":64,"
+        "\"tx_queue_depth\":%d,"
+        "\"tx_queue_max\":%u,"
         "\"uptime_seconds\":%d,"
         "\"cpu_temp_celsius\":%d,"
         "\"free_ram_bytes\":%lld,"
@@ -182,6 +238,8 @@ static void cmd_get_status(daemon_t *d, const char *id)
         d->channel,
         (d->state == STATE_MONITORING || d->state == STATE_INJECTING)
             ? "true" : "false",
+        (int)d->tx_q.count,
+        TX_QUEUE_MAX,
         uptime,
         cpu_temp,
         (long long)free_ram,
@@ -284,7 +342,7 @@ static void cmd_stop_monitor(daemon_t *d, const char *id)
     d->hop_enabled = false;
     capture_close(d);
     stream_close(d);
-    tx_close();
+    tx_close(d);
 
     if (radio_exit_monitor(d) < 0) {
         /* Log but still succeed — we've closed sockets */
@@ -317,7 +375,7 @@ static void cmd_restore_normal(daemon_t *d, const char *id)
         d->hop_enabled = false;
     capture_close(d);
         stream_close(d);
-        tx_close();
+        tx_close(d);
     }
 
     if (radio_restore_normal(d) < 0) {
@@ -442,9 +500,10 @@ static void cmd_send_injection(daemon_t *d, const char *id, const char *params)
     int              interval_ms = 0;
     size_t           frame_len   = 0;
     int              sent        = 0;
+    int              queued      = 0;
     int              failed      = 0;
     int              i;
-    char             data[64];
+    char             data[128];
 
     if (d->state != STATE_MONITORING && d->state != STATE_INJECTING) {
         send_error(d, id, "NOT_MONITORING",
@@ -479,59 +538,43 @@ static void cmd_send_injection(daemon_t *d, const char *id, const char *params)
 
     d->state = STATE_INJECTING;
 
+    /* Enqueue frames into non-blocking TX ring (§3.3) */
     for (i = 0; i < count; i++) {
-        int retries = 0;
-        int ok      = 0;
-
-        if (i > 0 && interval_ms > 0) {
-            util_sleep_ms(interval_ms);
+        if (d->tx_q.count >= TX_QUEUE_MAX) {
+            failed++;
+            d->inject_failures++;
+            continue;
         }
-
-        while (retries <= TX_RETRY_COUNT) {
-            ssize_t n;
-
-            if (d->mock_mode) {
-                /* Simulate TX success */
-                ok = 1;
-                break;
-            }
-
-            do {
-                n = send(s_tx_fd, frame_bin, frame_len, 0);
-            } while (n < 0 && errno == EINTR);
-
-            if (n >= 0) {
-                ok = 1;
-                break;
-            }
-
-            if (errno == ENOBUFS) {
-                /* hardware.md: retry 1ms x10 */
-                util_sleep_ms(TX_RETRY_MS);
-                retries++;
-                continue;
-            }
-
-            /* Other error — no retry */
-            util_log("inject", "send: %s", strerror(errno));
-            break;
-        }
-
-        if (ok) { sent++; } else { failed++; }
+        tx_slot_t *slot = &d->tx_q.slots[d->tx_q.head];
+        memcpy(slot->frame, frame_bin, frame_len);
+        slot->len = (uint16_t)frame_len;
+        slot->retries = 0;
+        d->tx_q.head = (d->tx_q.head + 1u) % TX_QUEUE_MAX;
+        d->tx_q.count++;
+        queued++;
     }
 
-    d->inject_failures += (uint64_t)failed;
+    /* Immediate opportunistic non-blocking drain */
+    while (d->tx_q.count > 0) {
+        int dr = tx_queue_drain_step(d);
+        if (dr > 0) {
+            sent++;
+        } else {
+            break; /* socket buffer full or empty; remainder drained in select loop */
+        }
+    }
 
     d->state = STATE_MONITORING;
 
-    if (failed > 0 && sent == 0) {
+    if (queued == 0 && failed > 0) {
         send_error(d, id, "TX_QUEUE_FULL",
-                   "TX queue saturated after retries");
+                   "TX queue saturated");
         return;
     }
 
     (void)snprintf(data, sizeof(data),
-        "{\"frames_sent\":%d,\"frames_failed\":%d}", sent, failed);
+        "{\"frames_sent\":%d,\"frames_queued\":%d,\"frames_failed\":%d}",
+        sent, queued - sent, failed);
     send_ok(d, id, data);
 }
 
@@ -626,7 +669,7 @@ static void cmd_reboot(daemon_t *d, const char *id)
         d->hop_enabled = false;
     capture_close(d);
         stream_close(d);
-        tx_close();
+        tx_close(d);
         (void)radio_exit_monitor(d);
     }
     util_log("ctrl", "REBOOT command — executing reboot");
@@ -955,7 +998,7 @@ void ctrl_close_client(daemon_t *d)
         d->hop_enabled = false;
     capture_close(d);
         stream_close(d);
-        tx_close();
+        tx_close(d);
         (void)radio_exit_monitor(d);
         util_log("ctrl", "client gone — monitor stopped, radio restored");
     }

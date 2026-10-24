@@ -85,6 +85,7 @@ int main(int argc, char *argv[])
     g_daemon.ctrl_client_fd  = -1;
     g_daemon.stream_fd       = -1;
     g_daemon.pkt_fd          = -1;
+    g_daemon.tx_fd           = -1;
     g_daemon.state           = STATE_IDLE;
     g_daemon.radio_mode      = RADIO_DOWN;
     g_daemon.channel         = 1;
@@ -173,6 +174,7 @@ int main(int argc, char *argv[])
     /* ── Main event loop ────────────────────────────────────────────────── */
     while (!g_daemon.sig_term) {
         fd_set   rfds;
+        fd_set   wfds;
         int      maxfd;
         struct timeval tv;
         int      r;
@@ -182,6 +184,7 @@ int main(int argc, char *argv[])
                    || g_daemon.state == STATE_INJECTING);
 
         FD_ZERO(&rfds);
+        FD_ZERO(&wfds);
 
         FD_SET(g_daemon.disc_fd, &rfds);
         maxfd = g_daemon.disc_fd;
@@ -202,6 +205,12 @@ int main(int argc, char *argv[])
         if (monitoring && !g_daemon.mock_mode && g_daemon.pkt_fd >= 0) {
             FD_SET(g_daemon.pkt_fd, &rfds);
             if (g_daemon.pkt_fd > maxfd) { maxfd = g_daemon.pkt_fd; }
+        }
+
+        /* If frames are pending in TX injection queue, monitor write readiness (§3.3) */
+        if (monitoring && g_daemon.tx_q.count > 0 && g_daemon.tx_fd >= 0 && !g_daemon.mock_mode) {
+            FD_SET(g_daemon.tx_fd, &wfds);
+            if (g_daemon.tx_fd > maxfd) { maxfd = g_daemon.tx_fd; }
         }
 
         /* Timeout: 10ms while monitoring (mock frame pacing + stream drain);
@@ -226,8 +235,9 @@ int main(int argc, char *argv[])
         }
         {
             struct timeval *tvp = (monitoring || g_daemon.hop_enabled) ? &tv : NULL;
+            fd_set *wset = (monitoring && g_daemon.tx_q.count > 0 && g_daemon.tx_fd >= 0 && !g_daemon.mock_mode) ? &wfds : NULL;
 
-            r = select(maxfd + 1, &rfds, NULL, NULL, tvp);
+            r = select(maxfd + 1, &rfds, wset, NULL, tvp);
         }
 
         if (r < 0) {
@@ -261,6 +271,17 @@ int main(int argc, char *argv[])
         if (g_daemon.ctrl_client_fd >= 0
          && FD_ISSET(g_daemon.ctrl_client_fd, &rfds)) {
             (void)ctrl_recv(&g_daemon);
+        }
+
+        /* ── Non-blocking TX frame injection drain (§3.3) ─────────────── */
+        if (monitoring && g_daemon.tx_q.count > 0) {
+            if (g_daemon.mock_mode || (g_daemon.tx_fd >= 0 && FD_ISSET(g_daemon.tx_fd, &wfds))) {
+                int tx_limit = 16;
+                while (tx_limit-- > 0 && g_daemon.tx_q.count > 0) {
+                    int dr = tx_queue_drain_step(&g_daemon);
+                    if (dr <= 0) { break; }
+                }
+            }
         }
 
         /* ── Capture frames ───────────────────────────────────────────── */
@@ -327,6 +348,7 @@ int main(int argc, char *argv[])
     if (g_daemon.ctrl_listen_fd >= 0) { close(g_daemon.ctrl_listen_fd); }
     if (g_daemon.disc_fd >= 0)        { close(g_daemon.disc_fd); }
     if (g_daemon.stream_fd >= 0)      { close(g_daemon.stream_fd); }
+    if (g_daemon.tx_fd >= 0)          { close(g_daemon.tx_fd); }
 
     util_log("main", "pwn4cd stopped cleanly");
     closelog();
