@@ -1,13 +1,13 @@
+  ____                 _  _    ____
+ |  _ \__      ___ __ | || |  / ___|
+ | |_) \ \ /\ / / '_ \| || |_| |
+ |  __/ \ V  V /| | | |__   _| |___
+ |_|     \_/\_/ |_| |_|  |_|  \____|
 
-  ____          _  _  _  ___
- |  _ \__      _| \| |/ |/ __|
- | |_) \ \ /\ / / .` |_  / (__
- |  __/ \ V  V /| |\  |/ /\__ \
- |_|     \_/\_/ |_| \_/_/ |___/
+  Pwn4C Drone OS  |  OpenWrt 23.05.5  |  MT7628N / mipsel
 
- Pwn4C Drone OS  |  OpenWrt 23.05.5  |  MT7628N / mipsel
- LAN: 192.168.4.1/24  |  SSH :22  |  Control :4444  |  Stream :5555
+  LAN 192.168.4.1/24  |  SSH :22  |  Control :4444  |  Stream :5555
 
- WARNING: Authorized access only. No root password is set by default.
-          Set credentials before deployment: passwd root
+  WARNING: Authorized access only. No root password is set by default.
+           Set credentials before deployment: passwd root
 
