@@ -125,6 +125,70 @@ ssh root@192.168.4.1 "logread | grep pwn4cd"
 
 ---
 
+## Drone Disappears After a Deauth Burst
+
+### Symptom
+
+Right after `pwn4c deauth` finishes, the drone stops answering: discovery
+fails, TCP 4444 refuses connections, and a minute later the drone is back
+with a fresh uptime (the daemon restarted, or the whole box rebooted).
+
+```
+[+] Injection completed. Frames sent: 15, Failed: 0
+PS> pwn4c discover
+[-] No active Pwn4C drones discovered on the local subnet.
+...
+[+] Found 1 drone(s):   ... UPTIME 6s
+```
+
+### What used to happen
+
+`deauth` responded and dropped the control session immediately. The daemon
+then tore the radio down while the paced TX queue still held deauth frames:
+the TX ring was ripped out mid-transmission and the interface was flipped out
+of monitor mode a fraction of a second after real RF activity. mt76x8 does
+not tolerate that sequence, and the drone either restarted the daemon or
+rebooted outright.
+
+### Fix (v1.2.0)
+
+Two changes, one on each side:
+
+1. **Daemon** — every teardown path (STOP_MONITOR, RESTORE_NORMAL, REBOOT,
+   client disconnect, SIGTERM) now runs `ctrl_teardown_monitor()`: it gives
+   queued injection frames a bounded 2-second window to leave the air, lets
+   the driver settle for 100 ms, and only then closes sockets and restores
+   the radio mode.
+2. **CLI** — `deauth` now reports transmitted / queued / failed separately
+   (`Frames sent: N` used to count still-queued frames), waits for the drone
+   TX queue to drain, and stops monitor mode explicitly before closing.
+
+### Verification
+
+```bash
+pwn4c deauth -b AA:BB:CC:DD:EE:FF -i 6 -n 15 --interval 10
+pwn4c discover        # should answer immediately with the SAME uptime
+```
+
+If the drone still disappears after this fix, capture the evidence before
+reconnecting:
+
+```bash
+ssh root@192.168.4.1 "logread | grep -iE 'pwn4cd|procd' | tail -20"
+ssh root@192.168.4.1 "dmesg | tail -30"
+```
+
+`procd` respawn messages point at a daemon crash; kernel trace lines point at
+a driver-level fault (include both when reporting).
+
+### Prefer the combined flow
+
+`pwn4c deauth --monitor -o handshake.pcap` keeps a single control session
+open — inject, then listen — so the teardown storm never happens in the first
+place and the handshake lands in the PCAP.
+
+---
+
 ## Exploit Failures
 
 ### Symptom
