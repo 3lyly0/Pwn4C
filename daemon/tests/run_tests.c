@@ -14,6 +14,7 @@ int run_json_tests(void);
 int run_stream_tests(void);
 int run_hex_tests(void);
 int run_bpf_tests(void);
+int run_beacon_tests(void);
 
 int main(void)
 {
@@ -30,6 +31,8 @@ int main(void)
     failures += run_hex_tests();
     printf("\n");
     failures += run_bpf_tests();
+    printf("\n");
+    failures += run_beacon_tests();
 
     printf("\n==============================================\n");
     if (failures > 0) {
