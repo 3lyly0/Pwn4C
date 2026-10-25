@@ -231,7 +231,7 @@ int util_run_cmd_capture(const char *cmd, char *out, size_t outsz, int timeout_s
         close(pipefd[0]);
         if (dup2(pipefd[1], STDOUT_FILENO) < 0) { _exit(126); }
         close(pipefd[1]);
-        (void)freopen("/dev/null", "w", stderr);
+        if (freopen("/dev/null", "w", stderr) == NULL) { /* best-effort */ }
         execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
         _exit(127);
     }
@@ -335,8 +335,8 @@ int util_run_detached(const char *cmd)
 
     if (pid == 0) {
         (void)setsid();
-        (void)freopen("/dev/null", "w", stdout);
-        (void)freopen("/dev/null", "w", stderr);
+        if (freopen("/dev/null", "w", stdout) == NULL) { /* best-effort */ }
+        if (freopen("/dev/null", "w", stderr) == NULL) { /* best-effort */ }
         execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
         _exit(127);
     }
