@@ -163,7 +163,8 @@ int wifi_sta_connect(daemon_t *d, const char *ssid, const char *psk,
     }
 
     (void)snprintf(piece, sizeof(piece),
-        "; uci set network.wan.proto='dhcp'; "
+        "; uci set network.wan.device='phy0-sta0'; "
+        "uci set network.wan.proto='dhcp'; "
         "uci set network.wan.auto='1'; "
         "uci set wireless.radio0.disabled='0'; "
         "uci set wireless.default_radio0.disabled='1'; "
@@ -171,7 +172,8 @@ int wifi_sta_connect(daemon_t *d, const char *ssid, const char *psk,
         "uci commit network; "
         "sysctl -q -w net.ipv4.ip_forward=1 2>/dev/null; "
         "wifi up; "
-        "ifup wan 2>/dev/null");
+        "ifup wan 2>/dev/null; "
+        "(sleep 2; udhcpc -i phy0-sta0 -n -q -R 2>/dev/null) &");
     if (strlen(cmd) + strlen(piece) + 1 >= sizeof(cmd)) { return -1; }
     (void)strncat(cmd, piece, sizeof(cmd) - strlen(cmd) - 1);
 
@@ -238,7 +240,16 @@ int wifi_sta_status(daemon_t *d, char *out_json, size_t outsz)
         }
     }
 
-    if (util_run_cmd_capture("ifstatus wan 2>/dev/null",
+    if (util_run_cmd_capture("for dev in phy0-sta0 $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do "
+                             "ip=$(ip -4 addr show dev \"$dev\" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -n1); "
+                             "if [ -n \"$ip\" ]; then echo \"$ip\"; break; fi; done",
+                             ip_str, sizeof(ip_str), 3) == 0) {
+        size_t len = strlen(ip_str);
+        while (len > 0 && (ip_str[len - 1] == '\r' || ip_str[len - 1] == '\n')) {
+            ip_str[--len] = '\0';
+        }
+    }
+    if (ip_str[0] == '\0' && util_run_cmd_capture("ifstatus wan 2>/dev/null",
                              wan, sizeof(wan), 3) == 0) {
         (void)json_get_str(wan, "address", ip_str, sizeof(ip_str));
     }
@@ -276,8 +287,10 @@ int wifi_sta_disconnect(daemon_t *d)
         "uci set wireless.radio0.disabled='1'; "
         "uci set network.wan.proto='none'; "
         "uci set network.wan.auto='0'; "
+        "uci -q delete network.wan.device; "
         "uci commit wireless; "
         "uci commit network; "
+        "killall udhcpc 2>/dev/null; "
         "wifi down 2>/dev/null; "
         "ip link set wlan0 down 2>/dev/null; "
         "true";
