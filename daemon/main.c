@@ -411,12 +411,7 @@ int main(int argc, char *argv[])
     /* ── Shutdown ───────────────────────────────────────────────────────── */
     util_log("main", "SIGTERM received — shutting down");
 
-    if (g_daemon.state == STATE_MONITORING
-     || g_daemon.state == STATE_INJECTING) {
-        capture_close(&g_daemon);
-        stream_close(&g_daemon);
-        (void)radio_exit_monitor(&g_daemon);
-    }
+    ctrl_teardown_monitor(&g_daemon);
 
     if (g_daemon.ctrl_client_fd >= 0) { close(g_daemon.ctrl_client_fd); }
     if (g_daemon.ctrl_listen_fd >= 0) { close(g_daemon.ctrl_listen_fd); }

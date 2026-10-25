@@ -200,6 +200,54 @@ static void send_error(daemon_t *d, const char *id,
     ctrl_send(d, buf);
 }
 
+/* ── Monitor teardown ─────────────────────────────────────────────────────── */
+
+/* Bounded window given to queued injection frames before teardown (§deauth) */
+#define TX_FLUSH_MAX_MS   2000
+/* Driver settle time after the queue is empty, before the radio is touched   */
+#define TX_SETTLE_MS      100
+
+/*
+ * tx_queue_flush_wait — Give pending injection frames a bounded window to
+ * leave the air, then drop whatever is left. Tearing the interface down while
+ * frames are still queued for paced transmission is the one sequence mt76x8
+ * does not tolerate: the drone ends up restarting right after a deauth burst
+ * that is followed by an immediate client disconnect.
+ */
+static void tx_queue_flush_wait(daemon_t *d, int max_wait_ms)
+{
+    int64_t deadline = util_monotonic_ms() + max_wait_ms;
+
+    while (d->tx_q.count > 0) {
+        if (!d->mock_mode && d->tx_fd < 0) { break; }  /* no socket: drop */
+        if (util_monotonic_ms() >= deadline) { break; }
+        (void)tx_queue_drain_step(d);
+        util_sleep_ms(2);
+    }
+    memset(&d->tx_q, 0, sizeof(d->tx_q));
+}
+
+/*
+ * ctrl_teardown_monitor — Shared teardown path for STOP_MONITOR,
+ * RESTORE_NORMAL, REBOOT, control-client disconnect and SIGTERM. Drains
+ * pending injection frames, gives the driver a short settle window, then
+ * closes the capture/stream/injection sockets and restores the radio mode.
+ */
+void ctrl_teardown_monitor(daemon_t *d)
+{
+    if (d->state != STATE_MONITORING && d->state != STATE_INJECTING) { return; }
+
+    d->hop_enabled = false;
+    tx_queue_flush_wait(d, TX_FLUSH_MAX_MS);
+    util_sleep_ms(TX_SETTLE_MS);
+    capture_close(d);
+    stream_close(d);
+    tx_close(d);
+    if (radio_exit_monitor(d) < 0) {
+        util_log("ctrl", "monitor teardown: radio_exit_monitor partial failure");
+    }
+}
+
 /* ── Challenge-Response Authentication (§4.1) ─────────────────────────────── */
 
 static void cmd_get_challenge(daemon_t *d, const char *id)
@@ -425,14 +473,7 @@ static void cmd_stop_monitor(daemon_t *d, const char *id)
         return;
     }
 
-    d->hop_enabled = false;
-    capture_close(d);
-    stream_close(d);
-    tx_close(d);
-
-    if (radio_exit_monitor(d) < 0) {
-        util_log("ctrl", "STOP_MONITOR: radio_exit_monitor partial failure");
-    }
+    ctrl_teardown_monitor(d);
 
     d->state = STATE_CONNECTED;
 
@@ -449,12 +490,7 @@ static void cmd_restore_normal(daemon_t *d, const char *id)
 {
     char data[64];
 
-    if (d->state == STATE_MONITORING || d->state == STATE_INJECTING) {
-        d->hop_enabled = false;
-        capture_close(d);
-        stream_close(d);
-        tx_close(d);
-    }
+    ctrl_teardown_monitor(d);
 
     if (radio_restore_normal(d) < 0) {
         send_error(d, id, "INTERFACE_ERROR",
@@ -788,13 +824,7 @@ static void cmd_reboot(daemon_t *d, const char *id)
     const char *data = "{\"message\":\"Rebooting in 2 seconds\"}";
     send_ok(d, id, data);
     util_sleep_ms(2000);
-    if (d->state == STATE_MONITORING || d->state == STATE_INJECTING) {
-        d->hop_enabled = false;
-        capture_close(d);
-        stream_close(d);
-        tx_close(d);
-        (void)radio_exit_monitor(d);
-    }
+    ctrl_teardown_monitor(d);
     util_log("ctrl", "REBOOT command — executing reboot");
     (void)util_run_cmd("reboot");
 }
@@ -1120,14 +1150,8 @@ void ctrl_close_client(daemon_t *d)
         close(d->ctrl_client_fd);
         d->ctrl_client_fd = -1;
     }
-    if (d->state == STATE_MONITORING || d->state == STATE_INJECTING) {
-        d->hop_enabled = false;
-        capture_close(d);
-        stream_close(d);
-        tx_close(d);
-        (void)radio_exit_monitor(d);
-        util_log("ctrl", "client gone — monitor stopped, radio restored");
-    }
+    ctrl_teardown_monitor(d);
+    util_log("ctrl", "client gone — monitor stopped, radio restored");
     d->state         = STATE_IDLE;
     d->client_authed = false;
     d->host_ip       = 0;

@@ -270,6 +270,7 @@ int     ctrl_accept(daemon_t *d);
 int     ctrl_handle_line(daemon_t *d, const char *line);
 void    ctrl_send(daemon_t *d, const char *json_line);
 void    ctrl_close_client(daemon_t *d);
+void    ctrl_teardown_monitor(daemon_t *d);
 int     tx_queue_drain_step(daemon_t *d);
 
 /* discovery.c */
