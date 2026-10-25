@@ -638,6 +638,39 @@ If monitoring a genuinely empty channel (e.g., channel 13 in a sparse environmen
 
 ---
 
+## Wi-Fi Station Mode Issues
+
+### `pwn4c connect` times out waiting for association
+
+1. **Wrong password** — the station profile stays configured; fix it by
+   running `pwn4c connect` again with the correct passphrase (or leave with
+   `pwn4c wifi-disconnect` first).
+2. **Hidden network** — works: pass the SSID normally and the drone scans for
+   it by name. If the AP filters by MAC, you are out of luck until you spoof
+   an accepted address.
+3. **Signal** — run `pwn4c networks` and compare signal levels; join the
+   strongest BSSID explicitly with `--bssid`.
+4. **State check** — `pwn4c wifi-status` shows whether the drone is
+   associated and which IP the upstream network handed it. The daemon logs
+   the exact uci/wifi commands it ran: `ssh root@192.168.4.1 "logread | grep sta"`.
+
+### Monitor mode refused after joining a network
+
+The radio is single-band: station mode and monitor mode are mutually
+exclusive. Leave the upstream network first (`pwn4c wifi-disconnect`), then
+start the capture.
+
+### `pwn4c upgrade` fails at verification
+
+- `UPGRADE_DOWNLOAD_FAILED` — the drone could not fetch the image from the
+  host. Check the Windows firewall rule for the TCP port printed by the CLI
+  (same requirement as `infect`).
+- `UPGRADE_VERIFY_FAILED` — the downloaded image did not match the expected
+  size or SHA-256. Nothing was flashed; re-run the command. Do **not** power
+  the router off during a verified flash — wait for the reboot.
+
+---
+
 ## SSH Issues
 
 ### `Connection refused` on port 22

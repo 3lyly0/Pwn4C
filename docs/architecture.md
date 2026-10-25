@@ -339,7 +339,9 @@ The following operations are **explicitly forbidden** to prevent destroying the 
 - ❌ `uci delete wireless.default_radio0` — never executed
 - ❌ Overwriting `ssid`, `encryption`, `key`, `mode` — never executed
 
-Only `wireless.radio0.disabled` is modified. The SSID, security, and channel settings survive any number of monitor mode cycles.
+Only `disabled` flags are modified. The SSID, security, and channel settings survive any number of monitor mode cycles.
+
+**Station-mode exception (v1.3.0):** the daemon owns exactly one additional profile, `wireless.pwn4c_sta`. It is the only profile `WIFI_CONNECT` may create and `WIFI_DISCONNECT` may delete, because it exists solely for the drone's own upstream link. While the station is up, `wireless.default_radio0.disabled` is set to `1` (the AP stays quiet) and `network.wan` switches to `proto=dhcp`; both flags are restored on disconnect, and the radio returns to the boot-safe DOWN state.
 
 ### Recovery Path
 

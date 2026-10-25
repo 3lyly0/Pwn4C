@@ -692,6 +692,160 @@ Returns detailed system diagnostics for debugging.
 
 ---
 
+#### `WIFI_SCAN` (Pwn4C extension)
+
+Surveys nearby access points from the monitor radio without touching the
+managed wireless stack. The daemon reuses an active monitor session when one
+exists (sweeping channels only when the autonomous hopper is idle), otherwise
+it enters monitor mode, sweeps channels 1-13, and restores the previous radio
+state. The response blocks until the sweep completes.
+
+**Request:**
+
+```json
+{
+  "id": "cmd-010",
+  "command": "WIFI_SCAN",
+  "params": {
+    "dwell_ms": 4000
+  }
+}
+```
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `dwell_ms` | integer | No | 4000 | Sweep duration, clamped to 1000-15000 ms |
+
+**Response:**
+
+```json
+{
+  "id": "cmd-010",
+  "status": "ok",
+  "data": {
+    "count": 2,
+    "dwell_ms": 4000,
+    "networks": [
+      {"ssid": "Test Network 123", "bssid": "aa:bb:cc:dd:ee:ff", "channel": 11,
+       "signal_dbm": -52, "hidden": false},
+      {"ssid": "", "bssid": "11:22:33:44:55:66", "channel": 6,
+       "signal_dbm": -55, "hidden": true, "ssid_len": 8}
+    ]
+  }
+}
+```
+
+Networks are deduplicated by BSSID and sorted by signal strength (strongest
+first). Hidden networks carry `"hidden": true`; `ssid_len` reports the
+advertised SSID length when the AP broadcasts a blanked IE with its real size
+(omit when unknown).
+
+---
+
+#### `WIFI_CONNECT` (Pwn4C extension)
+
+Joins the drone to an upstream Wi-Fi network through the Pwn4C-owned
+`pwn4c_sta` UCI profile (station mode, riding the `wan` interface). Monitor
+mode and station mode are mutually exclusive on the single radio; an active
+monitor session is torn down first.
+
+**Request:**
+
+```json
+{
+  "id": "cmd-011",
+  "command": "WIFI_CONNECT",
+  "params": {
+    "ssid": "MyNetwork",
+    "psk": "wireless-password",
+    "bssid": "AA:BB:CC:DD:EE:FF",
+    "encryption": "psk2"
+  }
+}
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `ssid` | string | Yes | Network name (1-32 characters) |
+| `psk` | string | No | WPA passphrase (8-63 chars). Omit or empty = open network |
+| `bssid` | string | No | Pin a specific AP |
+| `encryption` | string | No | Override UCI encryption: `psk2` (default), `psk`, `sae`, `sae-mixed`, `psk2-mixed` |
+
+**Response:** `{"connecting": true, "ssid": "MyNetwork"}` — association
+completes asynchronously; poll `WIFI_STATUS`.
+
+The stock AP profile is never modified — only its `disabled` flag is toggled
+while the station is up.
+
+---
+
+#### `WIFI_STATUS` (Pwn4C extension)
+
+Reports the drone's upstream station link.
+
+**Response data:**
+
+```json
+{
+  "connected": true,
+  "ssid": "MyNetwork",
+  "bssid": "AA:BB:CC:DD:EE:FF",
+  "ip": "192.168.1.44",
+  "channel": 6,
+  "mode": "sta"
+}
+```
+
+`connected` is `false` when the radio is not associated.
+
+---
+
+#### `WIFI_DISCONNECT` (Pwn4C extension)
+
+Removes the `pwn4c_sta` profile and returns the radio to the boot-safe DOWN
+state. **Response data:** `{"connected": false, "mode": "down"}`.
+
+---
+
+#### `UPGRADE` (Pwn4C extension)
+
+Verified over-the-air firmware update. The Host serves the sysupgrade image
+on a temporary HTTP server; the daemon downloads it, verifies the size and
+SHA-256, and only then launches `sysupgrade` in a detached session. The drone
+reboots right after the response is delivered — the TCP connection drops.
+
+**Request:**
+
+```json
+{
+  "id": "cmd-012",
+  "command": "UPGRADE",
+  "params": {
+    "url": "http://192.168.4.10:43111/image",
+    "size": 5571371,
+    "sha256": "6f4723750cdebfe452994e2724c0f1e9ba91011874433278d1b2b77ee9e6c5f8"
+  }
+}
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `url` | string | Yes | `http://` URL served by the Host (<= 200 chars) |
+| `size` | integer | Yes | Exact image size in bytes (512KB-8MB) |
+| `sha256` | string | Yes | 64 hex chars; mismatch aborts before flashing |
+
+**Response data:**
+
+```json
+{"message": "image verified; flashing now — the drone will reboot into the new firmware", "rebooting": true}
+```
+
+**Errors:** `INVALID_PARAMS`, `INTERNAL_ERROR` (no `/tmp` headroom),
+`UPGRADE_DOWNLOAD_FAILED`, `UPGRADE_VERIFY_FAILED` (size or checksum
+mismatch — the image is never flashed).
+
+---
+
 ### Async Events
 
 Events are pushed from the Drone without a preceding command. They always have `"id": null`.

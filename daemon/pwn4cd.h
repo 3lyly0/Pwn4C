@@ -25,7 +25,7 @@
 /* DAEMON_VERSION comes from the build (Makefile VERSION, default: git
  * describe). Keep the fallback for direct cc invocations. */
 #ifndef DAEMON_VERSION
-#define DAEMON_VERSION      "1.2.0"
+#define DAEMON_VERSION      "1.3.0"
 #endif
 #define DAEMON_HARDWARE     "mi4c-mt7628n"
 #define DAEMON_CHIPSET      "MT7628N"

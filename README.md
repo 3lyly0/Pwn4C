@@ -23,6 +23,9 @@ Pwn4C converts a stock Xiaomi Mi Router 4C (MediaTek MT7628N, ~$15 USD) into a h
 - **Live Wireshark Pipe Streaming (`pwn4c monitor -o -`)**: Streams standard `DLT_IEEE802_11_RADIO` PCAP records directly to `stdout` for real-time inspection in Wireshark (`pwn4c monitor -c 6 -o - | wireshark -k -i -`).
 - **Active 802.11 Frame Injection & Deauth (`pwn4c deauth`)**: Enqueues raw 802.11 management frames into a 64-slot non-blocking TX ring buffer with configurable inter-frame pacing (`--interval`).
 - **Hardware-Level RF Control & Self-Healing (`pwn4c config`, `pwn4c status`)**: Direct `nl80211` and POSIX `ioctl` control over transmission power (1–20 dBm), dynamic MAC spoofing/randomization, automatic interface recovery on `ENETDOWN`/`ENODEV`, and full drop telemetry (`rx_frames`, `tx_frames`, `ring_overruns`, `kernel_drops`, `iface_recoveries`).
+- **Wi-Fi Survey & Station Mode (`pwn4c networks`, `pwn4c connect`)**: The drone sweeps the 2.4 GHz band from monitor mode and reports every AP — hidden networks included, with their advertised SSID length — then can join an upstream network as a station (hidden SSIDs supported) without ever touching the stock AP profile.
+- **Verified OTA Firmware Updates (`pwn4c upgrade`)**: Push a sysupgrade image from the host over the control channel; the drone verifies size and SHA-256 before flashing and comes back online on the new firmware.
+- **Interactive Shell (`pwn4c shell`)**: One persistent control session with a numbered menu — survey, select, join, listen, deauth-then-capture — instead of chains of separate commands and reconnects.
 
 ---
 
@@ -37,6 +40,12 @@ Pwn4C converts a stock Xiaomi Mi Router 4C (MediaTek MT7628N, ~$15 USD) into a h
 | `hop` | `pwn4c hop [target_ip] -d 250 -c 1,6,11` | Starts autonomous drone-side channel hopping across specified channels |
 | `deauth` | `pwn4c deauth [target_ip] -b <bssid> [-c <client>] [--monitor -o hs.pcap]` | Injects raw IEEE 802.11 deauthentication frames; `--monitor` captures the handshake in the same session |
 | `config` | `pwn4c config [target_ip] --power 20 --mac random` | Adjusts TX power, randomizes/spoofs MAC, or restores normal mode |
+| `networks` | `pwn4c networks [-d 4000] [--json]` | Surveys nearby APs from the monitor radio (hidden SSIDs shown with their length) |
+| `connect` | `pwn4c connect <ssid> [-p pass]` | Joins the drone to an upstream Wi-Fi network (station mode, hidden SSIDs OK) |
+| `wifi-status` | `pwn4c wifi-status` | Shows the drone's upstream station link (SSID/BSSID/channel/IP) |
+| `wifi-disconnect` | `pwn4c wifi-disconnect` | Leaves the upstream network; radio returns to the idle state |
+| `upgrade` | `pwn4c upgrade --image sysupgrade.bin` | Verified OTA firmware update (SHA-256 checked, waits for the reboot) |
+| `shell` | `pwn4c shell` | Interactive single-session menu for all of the above |
 
 ---
 
@@ -105,6 +114,30 @@ pwn4c deauth -b AA:BB:CC:DD:EE:FF -c 11:22:33:44:55:66 -i 6 -n 20 --interval 10
 
 # Maximize TX power and randomize drone MAC
 pwn4c config --power 20 --mac random
+```
+
+### 6. Wi-Fi Management (survey, join, update)
+
+```bash
+# See what's around the drone — hidden networks show their advertised SSID length
+pwn4c networks
+
+# Join the drone to an upstream network (or add a hidden one by name)
+pwn4c connect "Test Network 123" -p 's3cret-pass'
+pwn4c wifi-status
+
+# Update the drone firmware over the air and wait for it to come back
+pwn4c upgrade --image pwn4c-firmware-mi4c-sysupgrade.bin
+```
+
+### 7. One Session, One Menu
+
+```bash
+pwn4c shell
+#   2) networks   -> survey
+#   3) use 1      -> pick a target network
+#   8) deauth     -> burst + automatic handshake capture
+#   q) quit
 ```
 
 ---

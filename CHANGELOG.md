@@ -3,6 +3,30 @@
 All notable changes to Pwn4C are documented here. For releases prior to
 v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
 
+## [1.3.0] - 2026-10-26
+
+### Added
+- **Wi-Fi survey** (`pwn4c networks`, daemon `WIFI_SCAN`): monitor-mode sweep
+  of the 2.4 GHz band with in-place beacon parsing. Networks come back
+  deduplicated by BSSID and signal-sorted; hidden networks are reported with
+  their advertised SSID length (blanked-IE heuristics). Unit-tested parser
+  (`test_beacon.c`).
+- **Station mode** (`pwn4c connect`, `pwn4c wifi-status`,
+  `pwn4c wifi-disconnect`; daemon `WIFI_CONNECT`/`WIFI_STATUS`/
+  `WIFI_DISCONNECT`): the drone joins an upstream network through a
+  Pwn4C-owned `pwn4c_sta` UCI profile. Hidden SSIDs are supported, the stock
+  AP profile is only ever toggled through its `disabled` flag, and
+  disconnecting returns the radio to the boot-safe DOWN state.
+- **Verified OTA updates** (`pwn4c upgrade`, daemon `UPGRADE`): the host
+  serves the sysupgrade image; the drone checks `/tmp` headroom, download
+  size and SHA-256 before flashing, and `sysupgrade` runs detached so procd
+  shutdown signals cannot kill the flash. The CLI waits through the reboot
+  and reports the new firmware version.
+- **Interactive shell** (`pwn4c shell`): one persistent control session with
+  a numbered menu — status, survey, select, join, listen, deauth-then-capture,
+  hop, power, reboot. The in-shell deauth flow injects the burst and keeps
+  listening on the same session for the handshake.
+
 ## [1.2.0] - 2026-10-26
 
 ### Fixed

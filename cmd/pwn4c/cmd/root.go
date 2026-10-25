@@ -12,7 +12,7 @@ var globalPSK string
 
 // Version is the CLI version. Release builds inject it with
 //
-//      go build -ldflags "-X github.com/3lyly0/Pwn4C/cmd/pwn4c/cmd.Version=v1.2.0"
+//      go build -ldflags "-X github.com/3lyly0/Pwn4C/cmd/pwn4c/cmd.Version=v1.3.0"
 //
 // Local builds report "dev".
 var Version = "dev"
