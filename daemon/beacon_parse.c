@@ -24,7 +24,7 @@ static const uint8_t RT_FIELD_SIZE[16]  = {
     2, 2, 1, 1, 2, 2, 2, 2    /* TX_ATTENUATION..bit15                         */
 };
 static const uint8_t RT_FIELD_ALIGN[16] = {
-    8, 1, 1, 2, 1, 1, 1, 2,
+    8, 1, 1, 2, 2, 1, 1, 2,
     2, 2, 1, 1, 2, 2, 2, 2
 };
 
@@ -36,48 +36,50 @@ static const uint8_t RT_FIELD_ALIGN[16] = {
 static void rt_walk(const uint8_t *rt, size_t rt_len,
                     int *signal_dbm, int *freq_mhz)
 {
-    uint32_t present;
-    size_t   off = 4;   /* past the fixed header (version, pad, len, present) */
+    uint32_t words[8];
+    size_t   num_words = 0;
+    size_t   data_off = 4;
     size_t   i;
 
     *signal_dbm = 0;
     *freq_mhz   = 0;
 
-    for (;;) {
-        if (off + 4 > rt_len) { return; }
-        present = (uint32_t)rt[off]
-                | ((uint32_t)rt[off + 1] << 8)
-                | ((uint32_t)rt[off + 2] << 16)
-                | ((uint32_t)rt[off + 3] << 24);
-        off += 4;
+    /* 1. Walk all present bitmaps. In radiotap, every present word has
+     * bit 31 set if another present word follows immediately. */
+    while (data_off + 4 <= rt_len && num_words < 8) {
+        uint32_t w = (uint32_t)rt[data_off]
+                   | ((uint32_t)rt[data_off + 1] << 8)
+                   | ((uint32_t)rt[data_off + 2] << 16)
+                   | ((uint32_t)rt[data_off + 3] << 24);
+        words[num_words++] = w;
+        data_off += 4;
+        if (!(w & (1u << 31))) {
+            break;
+        }
+    }
 
-        for (i = 0; i < 32; i++) {
-            if (!(present & (1u << i))) { continue; }
-            if (i == 31) { break; }   /* extension flag: next present word      */
+    if (num_words == 0) { return; }
 
-            if (i >= 16) {
-                /* Fields beyond our table: advance blindly by their natural
-                 * size is unsafe — bail out rather than desync.               */
-                return;
-            }
+    /* 2. Walk fields in word 0. We only care about frequency (bit 3)
+     * and antenna signal (bit 5). Bits 0..15 have fixed sizes. */
+    uint32_t word0 = words[0];
+    for (i = 0; i < 16; i++) {
+        if (!(word0 & (1u << i))) { continue; }
 
-            size_t size  = RT_FIELD_SIZE[i];
-            size_t align = RT_FIELD_ALIGN[i];
+        size_t size  = RT_FIELD_SIZE[i];
+        size_t align = RT_FIELD_ALIGN[i];
 
-            /* Align */
-            off = (off + align - 1) & ~(align - 1);
-            if (off + size > rt_len) { return; }   /* truncated: stop walking   */
+        /* Align to field requirement */
+        data_off = (data_off + align - 1) & ~(align - 1);
+        if (data_off + size > rt_len) { return; }
 
-            if (i == 3 && size == 4) {
-                *freq_mhz = (int)rt[off] | ((int)rt[off + 1] << 8);
-            } else if (i == 5 && size == 1) {
-                *signal_dbm = (int8_t)rt[off];
-            }
-
-            off += size;
+        if (i == 3 && size == 4) {
+            *freq_mhz = (int)rt[data_off] | ((int)rt[data_off + 1] << 8);
+        } else if (i == 5 && size == 1) {
+            *signal_dbm = (int8_t)rt[data_off];
         }
 
-        if (!(present & (1u << 31))) { return; }   /* no extension word         */
+        data_off += size;
     }
 }
 

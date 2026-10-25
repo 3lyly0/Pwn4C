@@ -106,7 +106,7 @@ static void scan_table_sort(scan_table_t *t)
 /* ── JSON rendering ───────────────────────────────────────────────────────── */
 
 static void scan_json_append_net(char *out, size_t outsz, size_t *off,
-                                 const scan_net_t *net)
+                                 const scan_net_t *net, int is_first)
 {
     char escaped[SCAN_SSID_MAX * 2 + 2];
     char bssid_str[18];
@@ -118,7 +118,7 @@ static void scan_json_append_net(char *out, size_t outsz, size_t *off,
     n = snprintf(out + *off, outsz - *off,
                  "%s{\"ssid\":\"%s\",\"bssid\":\"%s\",\"channel\":%d,"
                  "\"signal_dbm\":%d,\"hidden\":%s",
-                 (*off == 0) ? "" : ",",
+                 is_first ? "" : ",",
                  escaped,
                  bssid_str,
                  net->channel,
@@ -247,7 +247,7 @@ int scan_run(daemon_t *d, int dwell_ms, char *out_json, size_t out_sz)
     off = (size_t)n;
 
     for (i = 0; i < table.count; i++) {
-        scan_json_append_net(out_json, out_sz, &off, &table.nets[i]);
+        scan_json_append_net(out_json, out_sz, &off, &table.nets[i], (i == 0));
     }
 
     n = snprintf(out_json + off, out_sz - off, "]}");

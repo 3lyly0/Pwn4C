@@ -163,6 +163,53 @@ static void test_beacon_rejects(void)
           scan_parse_beacon(frame_buf, 20, 1, &net) != 0);
 }
 
+static void test_beacon_extended_radiotap(void)
+{
+    static const uint8_t bssid[6] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x77};
+    scan_net_t net;
+    uint8_t buf[256];
+    size_t off = 0;
+    size_t i;
+
+    buf[off++] = 0x00;
+    buf[off++] = 0x00;
+    buf[off++] = 20;
+    buf[off++] = 0x00;
+    buf[off++] = 0x2e;
+    buf[off++] = 0x00;
+    buf[off++] = 0x00;
+    buf[off++] = 0x80;
+    buf[off++] = 0x01;
+    buf[off++] = 0x00;
+    buf[off++] = 0x00;
+    buf[off++] = 0x00;
+    buf[off++] = 0x10;
+    buf[off++] = 0x02;
+    buf[off++] = (uint8_t)(2437 & 0xff);
+    buf[off++] = (uint8_t)(2437 >> 8);
+    buf[off++] = 0x40;
+    buf[off++] = 0x00;
+    buf[off++] = (uint8_t)(0x100 - 55);
+    buf[off++] = 0x00;
+
+    buf[off++] = 0x80; buf[off++] = 0x00;
+    buf[off++] = 0x00; buf[off++] = 0x00;
+    for (i = 0; i < 6; i++) buf[off++] = 0xff;
+    for (i = 0; i < 6; i++) buf[off++] = bssid[i];
+    for (i = 0; i < 6; i++) buf[off++] = bssid[i];
+    buf[off++] = 0x00; buf[off++] = 0x00;
+    for (i = 0; i < 8; i++) buf[off++] = 0x00;
+    buf[off++] = 0x64; buf[off++] = 0x00;
+    buf[off++] = 0x31; buf[off++] = 0x04;
+    buf[off++] = 0x00; buf[off++] = 4;
+    memcpy(buf + off, "test", 4); off += 4;
+    buf[off++] = 0x03; buf[off++] = 0x01; buf[off++] = 6;
+
+    CHECK("extended-radiotap: parse succeeds",
+          scan_parse_beacon(buf, off, 1, &net) == 0);
+    CHECK("extended-radiotap: signal extracted", net.signal_dbm == -55);
+}
+
 int run_beacon_tests(void)
 {
     printf("── beacon parser (beacon_parse.c)──────────────\n");
@@ -173,6 +220,7 @@ int run_beacon_tests(void)
     test_beacon_hidden_blank_ssid();
     test_beacon_hidden_zero_len();
     test_beacon_rejects();
+    test_beacon_extended_radiotap();
 
     printf("  (%d passed, %d failed)\n", g_passed, g_failed);
     return g_failed;

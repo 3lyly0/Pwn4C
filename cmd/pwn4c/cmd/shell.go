@@ -218,7 +218,7 @@ func (s *shellState) doUse(arg string) {
 		pick = &shellNet{ssid: n.SSID, bssid: n.BSSID, channel: n.Channel, hidden: n.Hidden}
 	} else {
 		for i := range s.nets {
-			if strings.EqualFold(s.nets[i].SSID, arg) {
+			if strings.EqualFold(s.nets[i].SSID, arg) || strings.EqualFold(s.nets[i].BSSID, arg) {
 				n := s.nets[i]
 				pick = &shellNet{ssid: n.SSID, bssid: n.BSSID, channel: n.Channel, hidden: n.Hidden}
 				break
@@ -287,7 +287,11 @@ func (s *shellState) doConnect() {
 		fmt.Printf("[*] '%s' is not visible in the air — the drone will scan for it by name.\n", ssid)
 	}
 
-	if err := s.client.WifiConnect(ssid, password, "", ""); err != nil {
+	bssid := ""
+	if s.selected != nil && s.selected.bssid != "" {
+		bssid = s.selected.bssid
+	}
+	if err := s.client.WifiConnect(ssid, password, bssid, ""); err != nil {
 		fmt.Printf("[!] Connect failed: %v\n", err)
 		return
 	}

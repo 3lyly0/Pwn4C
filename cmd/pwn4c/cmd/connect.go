@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -19,7 +20,7 @@ var (
 )
 
 var connectCmd = &cobra.Command{
-	Use:   "connect <ssid>",
+	Use:   "connect <ssid> [password]",
 	Short: "Join the drone to an upstream Wi-Fi network (station mode)",
 	Long: `Configures the drone radio as a station and associates it with the given
 network. The upstream link rides the wan interface, so the drone itself gains
@@ -31,7 +32,7 @@ interactively (hidden input); an empty password joins an open network.
 
 Association is asynchronous — this command polls WIFI_STATUS until the link
 is up (or --timeout expires) and then prints the assigned IP.`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.RangeArgs(1, 2),
 	Run: func(cmd *cobra.Command, args []string) {
 		ssid := args[0]
 		target := connectTarget
@@ -41,7 +42,9 @@ is up (or --timeout expires) and then prints the assigned IP.`,
 		defer client.Close()
 
 		password := connectPassword
-		if !cmd.Flags().Changed("password") {
+		if len(args) == 2 && !cmd.Flags().Changed("password") {
+			password = args[1]
+		} else if !cmd.Flags().Changed("password") {
 			// Ask interactively; empty answer = open network.
 			fmt.Print("[*] Enter Wi-Fi password (empty = open network): ")
 			raw, err := term.ReadPassword(int(os.Stdin.Fd()))
@@ -58,6 +61,9 @@ is up (or --timeout expires) and then prints the assigned IP.`,
 			os.Exit(1)
 		}
 
+		if _, err := net.ParseMAC(ssid); err == nil && connectBSSID == "" {
+			fmt.Printf("[i] Note: '%s' looks like a BSSID (MAC address). Wi-Fi connects using the network's SSID name (e.g. \"Test Network 123\").\n", ssid)
+		}
 		label := ssid
 		if password == "" {
 			label += " (open network)"

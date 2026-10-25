@@ -726,10 +726,9 @@ int radio_set_txpower(daemon_t *d, int dbm)
     }
 #endif
 
-    /* Fallback to iw */
-    if (d->radio_mode == RADIO_MONITOR) {
-        r = iw_run("iw phy phy0 set txpower fixed %d", mbm);
-    } else {
+    /* Fallback to iw: phy0 is always valid even when the network interface is down */
+    r = iw_run("iw phy phy0 set txpower fixed %d", mbm);
+    if (r != 0) {
         r = iw_run("iw dev %s set txpower fixed %d", d->wlan_iface, mbm);
     }
 
