@@ -139,6 +139,240 @@ int util_run_cmd(const char *cmd)
     return -1;
 }
 
+/*
+ * util_run_cmd_timeout — Run cmd via /bin/sh -c and wait up to timeout_secs.
+ * Used by the long-running management commands (WIFI_CONNECT, UPGRADE) where
+ * the 2-second iw budget does not apply.
+ * Returns the exit status (0 = success, >0 = failure, -1 = fork/timeout error).
+ */
+int util_run_cmd_timeout(const char *cmd, int timeout_secs)
+{
+    pid_t pid;
+    int   status;
+    int   waited;
+    struct timespec ts;
+
+    if (!cmd) { return -1; }
+    if (timeout_secs < 1) { timeout_secs = 1; }
+
+    util_log("cmd", "run(%ds): %s", timeout_secs, cmd);
+
+    pid = fork();
+    if (pid < 0) {
+        util_log("cmd", "fork failed: %s", strerror(errno));
+        return -1;
+    }
+
+    if (pid == 0) {
+        /* child */
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+
+    /* parent: poll with timeout */
+    ts.tv_sec  = 0;
+    ts.tv_nsec = 100L * 1000L * 1000L; /* 100ms poll interval */
+
+    for (waited = 0; waited < timeout_secs * 10; waited++) {
+        pid_t r;
+        int   st = 0;
+        do {
+            r = waitpid(pid, &st, WNOHANG);
+        } while (r < 0 && errno == EINTR);
+
+        if (r == pid) {
+            if (WIFEXITED(st))   { return WEXITSTATUS(st); }
+            if (WIFSIGNALED(st)) { return 128 + WTERMSIG(st); }
+            return -1;
+        }
+        nanosleep(&ts, NULL);
+    }
+
+    /* timeout: kill it */
+    util_log("cmd", "timeout killing pid %d", (int)pid);
+    kill(pid, SIGKILL);
+    waitpid(pid, &status, 0);
+    return -1;
+}
+
+/*
+ * util_run_cmd_capture — Run cmd and capture its stdout (bounded, NUL
+ * terminated, trailing whitespace stripped) with a hard timeout.
+ * Returns the exit status (0 = success, >0 = failure, -1 = fork/timeout).
+ */
+int util_run_cmd_capture(const char *cmd, char *out, size_t outsz, int timeout_secs)
+{
+    int      pipefd[2];
+    pid_t    pid;
+    int      status = -1;
+    int      flags;
+    size_t   total = 0;
+    int64_t  deadline;
+
+    if (!cmd || !out || outsz == 0) { return -1; }
+    out[0] = '\0';
+    if (timeout_secs < 1) { timeout_secs = 1; }
+
+    if (pipe(pipefd) < 0) {
+        util_log("cmd", "pipe failed: %s", strerror(errno));
+        return -1;
+    }
+
+    pid = fork();
+    if (pid < 0) {
+        util_log("cmd", "fork failed: %s", strerror(errno));
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
+
+    if (pid == 0) {
+        /* child: stdout -> pipe, stderr discarded */
+        close(pipefd[0]);
+        if (dup2(pipefd[1], STDOUT_FILENO) < 0) { _exit(126); }
+        close(pipefd[1]);
+        (void)freopen("/dev/null", "w", stderr);
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+    close(pipefd[1]);
+
+    flags = fcntl(pipefd[0], F_GETFL, 0);
+    if (flags >= 0) {
+        (void)fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
+    }
+
+    deadline = util_monotonic_ms() + (int64_t)timeout_secs * 1000LL;
+
+    for (;;) {
+        ssize_t   n;
+        pid_t     r;
+        int       st = 0;
+        bool      exited = false;
+
+        do {
+            n = read(pipefd[0], out + total, outsz - 1 - total);
+        } while (n < 0 && errno == EINTR);
+
+        if (n > 0) {
+            total += (size_t)n;
+            if (total >= outsz - 1) { break; }   /* output buffer full */
+        }
+
+        do {
+            r = waitpid(pid, &st, WNOHANG);
+        } while (r < 0 && errno == EINTR);
+
+        if (r == pid) {
+            exited = true;
+            /* drain whatever is left in the pipe (bounded) */
+            for (;;) {
+                do {
+                    n = read(pipefd[0], out + total, outsz - 1 - total);
+                } while (n < 0 && errno == EINTR);
+                if (n <= 0 || total >= outsz - 1) { break; }
+                total += (size_t)n;
+            }
+            if (WIFEXITED(st))   { status = WEXITSTATUS(st); }
+            else if (WIFSIGNALED(st)) { status = 128 + WTERMSIG(st); }
+            else { status = -1; }
+            break;
+        }
+
+        if (util_monotonic_ms() >= deadline) {
+            util_log("cmd", "capture timeout killing pid %d", (int)pid);
+            kill(pid, SIGKILL);
+            waitpid(pid, &st, 0);
+            status = -1;
+            break;
+        }
+
+        /* still running and nothing to read — brief sleep */
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            struct timespec ts = { .tv_sec = 0, .tv_nsec = 20L * 1000L * 1000L };
+            nanosleep(&ts, NULL);
+        }
+        (void)exited;
+    }
+
+    close(pipefd[0]);
+
+    /* Wait for the child if the buffer filled before it exited */
+    if (status == -1) {
+        int st = 0;
+        kill(pid, SIGKILL);
+        waitpid(pid, &st, 0);
+    }
+
+    /* strip trailing whitespace */
+    while (total > 0 && (out[total-1] == '\n' || out[total-1] == '\r'
+                      || out[total-1] == ' ' || out[total-1] == '\t')) {
+        out[--total] = '\0';
+    }
+
+    return status;
+}
+
+/*
+ * util_run_detached — Fork-and-forget execution for commands that outlive the
+ * daemon (sysupgrade reboots the box it runs on). The child gets its own
+ * session so procd shutdown signals aimed at pwn4cd do not reach it.
+ * Returns the child pid, or -1 on fork failure.
+ */
+int util_run_detached(const char *cmd)
+{
+    pid_t pid;
+
+    if (!cmd) { return -1; }
+
+    util_log("cmd", "detached: %s", cmd);
+
+    pid = fork();
+    if (pid < 0) {
+        util_log("cmd", "fork failed: %s", strerror(errno));
+        return -1;
+    }
+
+    if (pid == 0) {
+        (void)setsid();
+        (void)freopen("/dev/null", "w", stdout);
+        (void)freopen("/dev/null", "w", stderr);
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+
+    return (int)pid;
+}
+
+/*
+ * util_json_escape — Copy a string into JSON string content, escaping '"'
+ * and '\\' and dropping non-printable bytes. Bounded; always NUL terminates.
+ */
+void util_json_escape(const char *in, char *out, size_t outsz)
+{
+    size_t ri = 0;
+    size_t wi = 0;
+
+    if (!out || outsz == 0) { return; }
+    if (!in) { out[0] = '\0'; return; }
+
+    while (in[ri] != '\0' && wi + 2 < outsz) {
+        unsigned char c = (unsigned char)in[ri];
+        if (c == '"' || c == '\\') {
+            if (wi + 3 >= outsz) { break; }
+            out[wi++] = '\\';
+            out[wi++] = (char)c;
+            ri++;
+        } else if (c >= 0x20u && c < 0x7fu) {
+            out[wi++] = (char)c;
+            ri++;
+        } else {
+            ri++;   /* drop control / non-ASCII bytes */
+        }
+    }
+    out[wi] = '\0';
+}
+
 /* ── Monotonic clock helpers ─────────────────────────────────────────────── */
 
 int64_t util_monotonic_sec(void)

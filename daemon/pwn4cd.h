@@ -219,6 +219,10 @@ int     util_read_file(const char *path, char *buf, size_t bufsize);
 int     util_read_int_file(const char *path, int *out);
 void    util_log(const char *tag, const char *fmt, ...);
 int     util_run_cmd(const char *cmd);
+int     util_run_cmd_timeout(const char *cmd, int timeout_secs);
+int     util_run_cmd_capture(const char *cmd, char *out, size_t outsz, int timeout_secs);
+int     util_run_detached(const char *cmd);
+void    util_json_escape(const char *in, char *out, size_t outsz);
 int     util_uptime_seconds(void);
 int     util_free_ram_bytes(int64_t *out);
 int     util_cpu_temp(int *out_celsius);  /* integer tenths → rounded int    */
@@ -271,6 +275,11 @@ int     ctrl_handle_line(daemon_t *d, const char *line);
 void    ctrl_send(daemon_t *d, const char *json_line);
 void    ctrl_close_client(daemon_t *d);
 void    ctrl_teardown_monitor(daemon_t *d);
+/*
+ * ctrl_teardown_monitor covers every path that ends a capture session.
+ * It also fires when radio_mode is RADIO_MONITOR (e.g. an in-flight
+ * WIFI_SCAN) even if the daemon state has not been flipped.
+ */
 int     tx_queue_drain_step(daemon_t *d);
 
 /* discovery.c */
@@ -284,7 +293,33 @@ int     json_get_int(const char *json, const char *key, int *out);
 int     json_get_int_array(const char *json, const char *key, int *out, size_t max_out, size_t *out_len);
 int     json_field_exists(const char *json, const char *key);
 
+/* wifi_scan.c — monitor-mode survey (WIFI_SCAN) */
+#define SCAN_MAX_NETS       24
+#define SCAN_SSID_MAX       32
+
+typedef struct {
+    char     ssid[SCAN_SSID_MAX + 1];
+    uint8_t  bssid[6];
+    int      channel;
+    int      signal_dbm;      /* 0 when unknown                              */
+    uint16_t ssid_len;        /* advertised length even when hidden          */
+    bool     hidden;
+    uint16_t beacons;         /* announcement frames seen for this BSSID     */
+} scan_net_t;
+
+int     scan_run(daemon_t *d, int dwell_ms, char *out_json, size_t out_sz);
+int     scan_parse_beacon(const uint8_t *frame, size_t len,
+                          int fallback_channel, scan_net_t *out);
+
+/* wifi_sta.c — managed station mode (WIFI_CONNECT / STATUS / DISCONNECT)   */
+int     wifi_sta_connect(daemon_t *d, const char *ssid, const char *psk,
+                         const char *bssid, const char *encryption);
+int     wifi_sta_status(daemon_t *d, char *out_json, size_t out_sz);
+int     wifi_sta_disconnect(daemon_t *d);
+
 /* mock.c */
 void    mock_run(daemon_t *d);
+void    mock_scan_json(char *out, size_t n);
+void    mock_sta_status_json(char *out, size_t n);
 
 #endif /* PWN4CD_H */

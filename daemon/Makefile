@@ -17,7 +17,7 @@
 
 # ── Source files ──────────────────────────────────────────────────────────── #
 SRCS := main.c util.c json_parse.c radio.c capture.c stream.c \
-        discovery.c control.c mock.c
+        discovery.c control.c mock.c wifi_scan.c wifi_sta.c
 
 OBJS := $(SRCS:.c=.o)
 

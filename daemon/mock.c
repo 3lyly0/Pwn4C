@@ -64,3 +64,35 @@ void mock_run(daemon_t *d)
 
     util_log("mock", "mock mode active — no hardware ops");
 }
+
+/*
+ * mock_scan_json — Canned WIFI_SCAN result used by the e2e tests and by the
+ * host CLI smoke tests. Includes one hidden network with a known advertised
+ * SSID length so the host-side rendering path is exercised too.
+ */
+void mock_scan_json(char *out, size_t n)
+{
+    (void)snprintf(out, n,
+        "{\"count\":4,\"dwell_ms\":4000,\"networks\":["
+        "{\"ssid\":\"mock-drone\",\"bssid\":\"02:00:00:de:ad:01\","
+            "\"channel\":6,\"signal_dbm\":-42,\"hidden\":false},"
+        "{\"ssid\":\"mock-lab-5\",\"bssid\":\"02:00:00:de:ad:02\","
+            "\"channel\":11,\"signal_dbm\":-58,\"hidden\":false},"
+        "{\"ssid\":\"\",\"bssid\":\"02:00:00:de:ad:03\","
+            "\"channel\":1,\"signal_dbm\":-64,\"hidden\":true,\"ssid_len\":8},"
+        "{\"ssid\":\"mock-open\",\"bssid\":\"02:00:00:de:ad:04\","
+            "\"channel\":3,\"signal_dbm\":-71,\"hidden\":false}"
+        "]}");
+}
+
+/*
+ * mock_sta_status_json — Canned WIFI_STATUS result: associated with an
+ * upstream AP holding a DHCP lease.
+ */
+void mock_sta_status_json(char *out, size_t n)
+{
+    (void)snprintf(out, n,
+        "{\"connected\":true,\"ssid\":\"mock-uplink\","
+        "\"bssid\":\"02:00:00:de:ad:09\",\"ip\":\"192.168.1.44\","
+        "\"channel\":11,\"mode\":\"sta\"}");
+}

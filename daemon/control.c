@@ -27,6 +27,8 @@
 #include <linux/if_ether.h>
 #include <net/if.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <time.h>
 
 /* ── Partial-read accumulation buffer (per control client) ────────────────── */
@@ -235,7 +237,8 @@ static void tx_queue_flush_wait(daemon_t *d, int max_wait_ms)
  */
 void ctrl_teardown_monitor(daemon_t *d)
 {
-    if (d->state != STATE_MONITORING && d->state != STATE_INJECTING) { return; }
+    if (d->state != STATE_MONITORING && d->state != STATE_INJECTING
+        && d->radio_mode != RADIO_MONITOR) { return; }
 
     d->hop_enabled = false;
     tx_queue_flush_wait(d, TX_FLUSH_MAX_MS);
@@ -873,6 +876,223 @@ static void cmd_get_diagnostics(daemon_t *d, const char *id)
     send_ok(d, id, data);
 }
 
+/* ── Wi-Fi management (WIFI_SCAN / WIFI_CONNECT / WIFI_STATUS / DISCONNECT)  */
+
+static void cmd_wifi_scan(daemon_t *d, const char *id, const char *params)
+{
+    int dwell_ms = 4000;
+
+    (void)json_get_int(params, "dwell_ms", &dwell_ms);
+
+    if (d->mock_mode) {
+        char data[512];
+        mock_scan_json(data, sizeof(data));
+        send_ok(d, id, data);
+        return;
+    }
+
+    /* Survey response can hold up to SCAN_MAX_NETS entries: static buffer */
+    static char scan_json[8192];
+    if (scan_run(d, dwell_ms, scan_json, sizeof(scan_json)) < 0) {
+        send_error(d, id, "INTERFACE_ERROR", "Wi-Fi survey failed");
+        return;
+    }
+    send_ok(d, id, scan_json);
+}
+
+static void cmd_wifi_connect(daemon_t *d, const char *id, const char *params)
+{
+    char ssid[SCAN_SSID_MAX + 2];
+    char psk[80];
+    char bssid[32];
+    char enc[32];
+    char esc_ssid[SCAN_SSID_MAX * 2 + 2];
+    char data[160];
+
+    if (d->mock_mode) {
+        send_ok(d, id, "{\"connecting\":true,\"mock\":true}");
+        return;
+    }
+
+    if (json_get_str(params, "ssid", ssid, sizeof(ssid)) < 0
+        || ssid[0] == '\0') {
+        send_error(d, id, "INVALID_PARAMS", "Missing ssid parameter");
+        return;
+    }
+    (void)json_get_str(params, "psk", psk, sizeof(psk));
+    (void)json_get_str(params, "bssid", bssid, sizeof(bssid));
+    (void)json_get_str(params, "encryption", enc, sizeof(enc));
+
+    if (wifi_sta_connect(d, ssid, psk, bssid, enc) < 0) {
+        send_error(d, id, "INTERFACE_ERROR",
+                   "Failed to configure the station profile (see logread)");
+        return;
+    }
+
+    util_json_escape(ssid, esc_ssid, sizeof(esc_ssid));
+    (void)snprintf(data, sizeof(data),
+        "{\"connecting\":true,\"ssid\":\"%s\"}", esc_ssid);
+    send_ok(d, id, data);
+}
+
+static void cmd_wifi_status(daemon_t *d, const char *id)
+{
+    if (d->mock_mode) {
+        char data[256];
+        mock_sta_status_json(data, sizeof(data));
+        send_ok(d, id, data);
+        return;
+    }
+
+    static char sta_json[512];
+    (void)wifi_sta_status(d, sta_json, sizeof(sta_json));
+    send_ok(d, id, sta_json);
+}
+
+static void cmd_wifi_disconnect(daemon_t *d, const char *id)
+{
+    if (d->mock_mode) {
+        send_ok(d, id, "{\"connected\":false,\"mock\":true}");
+        return;
+    }
+
+    if (wifi_sta_disconnect(d) < 0) {
+        send_error(d, id, "INTERFACE_ERROR",
+                   "Failed to remove the station profile (see logread)");
+        return;
+    }
+    send_ok(d, id, "{\"connected\":false,\"mode\":\"down\"}");
+}
+
+/* ── OTA firmware upgrade (UPGRADE) ───────────────────────────────────────── */
+
+#define UPGRADE_TMP_PATH    "/tmp/pwn4c-upgrade.bin"
+#define UPGRADE_MIN_BYTES   (512u * 1024u)
+#define UPGRADE_MAX_BYTES   (8u * 1024u * 1024u)
+
+static int hex64_matches(const char *a, const char *b)
+{
+    size_t i;
+    uint8_t diff = 0;
+
+    for (i = 0; i < 64u; i++) {
+        diff |= (uint8_t)(tolower((unsigned char)a[i])
+                        ^ tolower((unsigned char)b[i]));
+    }
+    return diff == 0;
+}
+
+static void cmd_upgrade(daemon_t *d, const char *id, const char *params)
+{
+    char        url[256];
+    char        sha_hex[80];
+    char        sum_out[256];
+    char        cmd[640];
+    int         expected_size = 0;
+    struct stat st;
+
+    if (json_get_str(params, "url", url, sizeof(url)) < 0
+        || strncmp(url, "http://", 7) != 0
+        || strlen(url) > 200) {
+        send_error(d, id, "INVALID_PARAMS",
+                   "Missing or malformed url parameter (http://, <=200 chars)");
+        return;
+    }
+    if (json_get_str(params, "sha256", sha_hex, sizeof(sha_hex)) < 0
+        || strlen(sha_hex) != 64u) {
+        send_error(d, id, "INVALID_PARAMS",
+                   "Missing or malformed sha256 parameter (64 hex chars)");
+        return;
+    }
+    if (json_get_int(params, "size", &expected_size) < 0
+        || expected_size < (int)UPGRADE_MIN_BYTES
+        || expected_size > (int)UPGRADE_MAX_BYTES) {
+        send_error(d, id, "INVALID_PARAMS",
+                   "Missing or implausible size parameter (512KB-8MB)");
+        return;
+    }
+
+    if (d->mock_mode) {
+        send_ok(d, id,
+                "{\"message\":\"mock upgrade accepted (no flash in mock mode)\","
+                "\"rebooting\":false}");
+        return;
+    }
+
+    /* sysupgrade reboots the box: a live capture session ends here anyway */
+    ctrl_teardown_monitor(d);
+
+    /* /tmp headroom: the image lands on tmpfs before the flash write */
+    {
+        struct statvfs vfs;
+        if (statvfs("/tmp", &vfs) == 0) {
+            int64_t free_bytes = (int64_t)vfs.f_bavail * (int64_t)vfs.f_frsize;
+            if (free_bytes < (int64_t)expected_size + 512 * 1024) {
+                send_error(d, id, "INTERNAL_ERROR",
+                           "Not enough free space in /tmp for the image");
+                return;
+            }
+        }
+    }
+
+    util_log("ctrl", "UPGRADE: downloading %s (%d bytes)", url, expected_size);
+    (void)util_run_cmd("rm -f " UPGRADE_TMP_PATH);
+    (void)snprintf(cmd, sizeof(cmd),
+        "uclient-fetch -q -O " UPGRADE_TMP_PATH " '%s' || "
+        "wget -q -O " UPGRADE_TMP_PATH " '%s'",
+        url, url);
+    if (util_run_cmd_timeout(cmd, 180) != 0) {
+        (void)util_run_cmd("rm -f " UPGRADE_TMP_PATH);
+        send_error(d, id, "UPGRADE_DOWNLOAD_FAILED",
+                   "Could not download the image from the host");
+        return;
+    }
+
+    memset(&st, 0, sizeof(st));
+    if (stat(UPGRADE_TMP_PATH, &st) != 0 || st.st_size != (off_t)expected_size) {
+        (void)util_run_cmd("rm -f " UPGRADE_TMP_PATH);
+        send_error(d, id, "UPGRADE_VERIFY_FAILED",
+                   "Downloaded image size mismatch — not flashing");
+        return;
+    }
+
+    if (util_run_cmd_capture("sha256sum " UPGRADE_TMP_PATH " 2>/dev/null",
+                             sum_out, sizeof(sum_out), 60) != 0) {
+        (void)util_run_cmd("rm -f " UPGRADE_TMP_PATH);
+        send_error(d, id, "UPGRADE_VERIFY_FAILED",
+                   "sha256sum unavailable or failed");
+        return;
+    }
+
+    {
+        char got[65];
+        size_t i = 0;
+        while (i < 64 && sum_out[i] != '\0'
+               && ((sum_out[i] >= '0' && sum_out[i] <= '9')
+                || (sum_out[i] >= 'a' && sum_out[i] <= 'f')
+                || (sum_out[i] >= 'A' && sum_out[i] <= 'F'))) {
+            got[i] = sum_out[i];
+            i++;
+        }
+        got[i] = '\0';
+
+        if (i != 64u || !hex64_matches(got, sha_hex)) {
+            util_log("ctrl", "UPGRADE: checksum mismatch (got %.16s...)", got);
+            (void)util_run_cmd("rm -f " UPGRADE_TMP_PATH);
+            send_error(d, id, "UPGRADE_VERIFY_FAILED",
+                       "Image checksum mismatch — not flashing");
+            return;
+        }
+    }
+
+    util_log("ctrl", "UPGRADE: image verified, launching sysupgrade");
+    send_ok(d, id,
+        "{\"message\":\"image verified; flashing now — the drone will reboot "
+        "into the new firmware\",\"rebooting\":true}");
+    util_sleep_ms(300);
+    (void)util_run_detached("sysupgrade " UPGRADE_TMP_PATH);
+}
+
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
 int ctrl_setup(daemon_t *d)
@@ -1069,6 +1289,16 @@ int ctrl_handle_line(daemon_t *d, const char *line)
         cmd_reboot(d, id);
     } else if (strcmp(cmd, "GET_DIAGNOSTICS") == 0) {
         cmd_get_diagnostics(d, id);
+    } else if (strcmp(cmd, "WIFI_SCAN") == 0) {
+        cmd_wifi_scan(d, id, params);
+    } else if (strcmp(cmd, "WIFI_CONNECT") == 0) {
+        cmd_wifi_connect(d, id, params);
+    } else if (strcmp(cmd, "WIFI_STATUS") == 0) {
+        cmd_wifi_status(d, id);
+    } else if (strcmp(cmd, "WIFI_DISCONNECT") == 0) {
+        cmd_wifi_disconnect(d, id);
+    } else if (strcmp(cmd, "UPGRADE") == 0) {
+        cmd_upgrade(d, id, params);
     } else {
         send_error(d, id, "INVALID_COMMAND", "Unknown command name");
     }
