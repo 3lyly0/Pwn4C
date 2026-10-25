@@ -326,7 +326,7 @@ Expected:
 
 IP ADDRESS     DRONE ID      STATE   CHIP     FIRMWARE   UPTIME
 ----------     --------      -----   ----     --------   ------
-192.168.4.1:4444  pwn4c-89db  idle    MT7628N  1.0.0      47s
+192.168.4.1:4444  pwn4c-89db  idle    MT7628N  1.1.0      47s
 ```
 
 If the drone is reachable but is not listed, restrict the probe to the LAN
