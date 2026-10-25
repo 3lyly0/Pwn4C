@@ -169,7 +169,9 @@ int wifi_sta_connect(daemon_t *d, const char *ssid, const char *psk,
         "uci set wireless.default_radio0.disabled='1'; "
         "uci commit wireless; "
         "uci commit network; "
-        "wifi up");
+        "sysctl -q -w net.ipv4.ip_forward=1 2>/dev/null; "
+        "wifi up; "
+        "ifup wan 2>/dev/null");
     if (strlen(cmd) + strlen(piece) + 1 >= sizeof(cmd)) { return -1; }
     (void)strncat(cmd, piece, sizeof(cmd) - strlen(cmd) - 1);
 
