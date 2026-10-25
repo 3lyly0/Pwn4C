@@ -115,7 +115,7 @@ int wifi_sta_connect(daemon_t *d, const char *ssid, const char *psk,
         }
         (void)snprintf(enc, sizeof(enc), "%s", encryption);
     } else {
-        (void)snprintf(enc, sizeof(enc), "psk2");
+        (void)snprintf(enc, sizeof(enc), "psk-mixed");
     }
 
     if (bssid && bssid[0] != '\0') {
@@ -141,8 +141,9 @@ int wifi_sta_connect(daemon_t *d, const char *ssid, const char *psk,
         "uci set wireless.%s.device='radio0'; "
         "uci set wireless.%s.mode='sta'; "
         "uci set wireless.%s.network='wan'; "
+        "uci set wireless.%s.disabled='0'; "
         "uci set wireless.%s.ssid=%s",
-        STA_IFACE, STA_IFACE, STA_IFACE, STA_IFACE, STA_IFACE, STA_IFACE, q_ssid);
+        STA_IFACE, STA_IFACE, STA_IFACE, STA_IFACE, STA_IFACE, STA_IFACE, STA_IFACE, q_ssid);
 
     if (enc[0] != '\0' && strcmp(enc, "none") != 0) {
         if (sh_single_quote(psk, q_psk, sizeof(q_psk)) < 0) { return -1; }
@@ -200,7 +201,7 @@ int wifi_sta_status(daemon_t *d, char *out_json, size_t outsz)
     bool connected = false;
     int  channel   = 0;
 
-    if (util_run_cmd_capture("iw dev wlan0 link 2>/dev/null",
+    if (util_run_cmd_capture("for iface in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do out=$(iw dev \"$iface\" link 2>/dev/null); if echo \"$out\" | grep -q 'Connected to '; then echo \"$out\"; break; fi; done",
                              link, sizeof(link), 3) == 0) {
         const char *p = strstr(link, "Connected to ");
         if (p) {

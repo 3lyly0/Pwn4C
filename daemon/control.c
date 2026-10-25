@@ -246,6 +246,7 @@ void ctrl_teardown_monitor(daemon_t *d)
     capture_close(d);
     stream_close(d);
     tx_close(d);
+    util_sleep_ms(150);
     if (radio_exit_monitor(d) < 0) {
         util_log("ctrl", "monitor teardown: radio_exit_monitor partial failure");
     }

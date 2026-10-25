@@ -3,6 +3,13 @@
 All notable changes to Pwn4C are documented here. For releases prior to
 v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
 
+## [1.3.2] - 2026-10-26
+
+### Fixed
+- **Shell persistence across Ctrl+C & deauth:** Stopping capture in `deauth` or `listen` now closes the receiver without tearing down monitor mode or triggering mt76 kernel teardown panics; pressing Ctrl+C in the menu recreates the console scanner rather than killing the shell.
+- **Wi-Fi Station Mode association:** Default encryption set to `psk-mixed` (WPA/WPA2 compatible); removed default BSSID pinning in shell connect; dynamically discover the connected wireless interface name in `WIFI_STATUS`.
+- **Clean monitor mode transitions:** `radio_enter_monitor` now terminates any background `wpa_supplicant` and settles before switching mode, eliminating transient EBUSY errors after failed station joins.
+
 ## [1.3.1] - 2026-10-26
 
 ### Fixed

@@ -589,9 +589,10 @@ int radio_enter_monitor(daemon_t *d, int channel)
     d->saved_channel    = d->channel > 0 ? d->channel : 6;
     d->saved_radio_mode = d->radio_mode;
 
-    /* Step 1: stop managed stack */
-    r = iw_run("wifi down 2>/dev/null; true");
+    /* Step 1: stop managed stack and kill any lingering supplicant */
+    r = iw_run("killall -9 wpa_supplicant 2>/dev/null; wifi down 2>/dev/null; true");
     (void)r;
+    util_sleep_ms(150);
 
     /* Step 2: bring link down via POSIX ioctl */
     (void)iface_set_up(d->wlan_iface, false);

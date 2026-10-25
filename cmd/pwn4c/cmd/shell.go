@@ -103,6 +103,11 @@ func (s *shellState) run() {
 		fmt.Print(shellMenu)
 		fmt.Print("pwn4c> ")
 		if !s.in.Scan() {
+			if s.in.Err() != nil {
+				s.in = bufio.NewScanner(os.Stdin)
+				fmt.Println()
+				continue
+			}
 			fmt.Println()
 			return
 		}
@@ -287,11 +292,7 @@ func (s *shellState) doConnect() {
 		fmt.Printf("[*] '%s' is not visible in the air — the drone will scan for it by name.\n", ssid)
 	}
 
-	bssid := ""
-	if s.selected != nil && s.selected.bssid != "" {
-		bssid = s.selected.bssid
-	}
-	if err := s.client.WifiConnect(ssid, password, bssid, ""); err != nil {
+	if err := s.client.WifiConnect(ssid, password, "", ""); err != nil {
 		fmt.Printf("[!] Connect failed: %v\n", err)
 		return
 	}
@@ -428,8 +429,7 @@ func (s *shellState) doListen(deauth bool) {
 
 		waitForInterrupt()
 
-		fmt.Println("\n[*] Stopping...")
-		_ = s.client.StopMonitor()
+		fmt.Println("\n[*] Stopping capture...")
 		receiver.Close()
 		fmt.Printf("[+] Capture saved: %s\n", outPath)
 		fmt.Println("    wireshark -r " + outPath + "   (filter: eapol || wlan.fc.type_subtype == 0x0c)")
@@ -458,8 +458,7 @@ func (s *shellState) doListen(deauth bool) {
 
 	waitForInterrupt()
 
-	fmt.Println("\n[*] Stopping...")
-	_ = s.client.StopMonitor()
+	fmt.Println("\n[*] Stopping capture...")
 	receiver.Close()
 	fmt.Printf("[+] Capture saved: %s\n", outPath)
 }
