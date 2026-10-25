@@ -115,7 +115,7 @@ int wifi_sta_connect(daemon_t *d, const char *ssid, const char *psk,
         }
         (void)snprintf(enc, sizeof(enc), "%s", encryption);
     } else {
-        (void)snprintf(enc, sizeof(enc), "psk-mixed");
+        (void)snprintf(enc, sizeof(enc), "psk2");
     }
 
     if (bssid && bssid[0] != '\0') {
