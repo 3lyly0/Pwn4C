@@ -1,0 +1,31 @@
+wifi: mt76: mt7603: initialize global station WCID
+
+mt7603 uses a driver-private global station WCID for frames that have
+neither a station nor a vif, including frames injected through a monitor
+interface. Unlike the core global WCID initialized by
+mt76_register_device(), this WCID is published without ever being passed
+to mt76_wcid_init().
+
+mt76_tx() queues every such frame on the WCID's tx_pending queue and links
+its tx_list. The first injected frame therefore reaches
+__skb_queue_tail() with an uninitialized sk_buff_head and dereferences a
+NULL prev pointer, which on MT7628 (Mi Router 4C) panics the kernel and
+reboots the board.
+
+Initialize the WCID before publishing it.
+
+Backport of upstream commit c50f17ec046e ("wifi: mt76: mt7603:
+initialize global station WCID") to mt76 as pinned by OpenWrt 23.05.5
+(1e336a8582dce2ef32ddd440d423e9afef961e71). On that version
+mt76_wcid_init() still takes a single argument.
+
+--- a/mt7603/init.c
++++ b/mt7603/init.c
+@@ -229,6 +229,7 @@
+ 
+ 	eth_broadcast_addr(bc_addr);
+ 	mt7603_wtbl_init(dev, MT7603_WTBL_RESERVED, -1, bc_addr);
++	mt76_wcid_init(&dev->global_sta.wcid);
+ 	dev->global_sta.wcid.idx = MT7603_WTBL_RESERVED;
+ 	rcu_assign_pointer(dev->mt76.wcid[MT7603_WTBL_RESERVED],
+ 			   &dev->global_sta.wcid);

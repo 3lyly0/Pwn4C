@@ -70,6 +70,24 @@ fi
 # only fall back to `iw link`, which looks "connected" before authentication.
 PACKAGES="iw wpa-cli tcpdump-mini -ppp -ppp-mod-pppoe -firewall4 -odhcpd-ipv6only -odhcp6c -kmod-ipv6"
 
+# Patched mt76 driver (monitor-mode TX fix). The stock 23.05.5 driver panics
+# MT7628 on the very first injected deauth frame; the fix is a kernel change,
+# which the ImageBuilder cannot apply. build-mt76-kmod.sh builds the two kmods
+# with the matching SDK and drops them in prebuilt/; their PKG_RELEASE=2
+# overrides the stock release 1 packages.
+MT76_IPKS=""
+for ipk in "$FW_DIR"/prebuilt/kmod-mt76-core_*.ipk "$FW_DIR"/prebuilt/kmod-mt7603_*.ipk; do
+    [ -f "$ipk" ] || continue
+    MT76_IPKS="$MT76_IPKS $ipk"
+done
+if [ -n "$MT76_IPKS" ]; then
+    echo "[*] Using patched mt76 kmods:$MT76_IPKS"
+    PACKAGES="$PACKAGES$MT76_IPKS"
+else
+    echo "[!] No prebuilt mt76 kmods in $FW_DIR/prebuilt — the image keeps the" \
+         "stock driver and 'deauth' will reboot the drone." >&2
+fi
+
 chmod +x "$FW_DIR/files/etc/init.d/"* 2>/dev/null || true
 chmod +x "$FW_DIR/files/etc/uci-defaults/"* 2>/dev/null || true
 chmod +x "$FW_DIR/files/usr/lib/pwn4c/"*.sh 2>/dev/null || true
@@ -192,6 +210,15 @@ if [ -f "$MANIFEST" ]; then
             echo "  [PASS] ${banned} absent"
         fi
     done
+    if [ -n "${MT76_IPKS:-}" ]; then
+        if grep -qE '^kmod-mt7603 - .*-2$' "$MANIFEST" &&
+           grep -qE '^kmod-mt76-core - .*-2$' "$MANIFEST"; then
+            echo "  [PASS] patched mt76 kmods (release -2)"
+        else
+            echo "  [FAIL] stock mt76 kmods in image (deauth would panic)"
+            BUILD_FAIL=1
+        fi
+    fi
     echo "─────────────────────────────────────────────────────────────"
 else
     echo "[!] No manifest file found in $IB_BIN_DIR — skipping package checks"

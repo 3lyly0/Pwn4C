@@ -1,0 +1,43 @@
+wifi: mt76: guard against an uninitialised WCID TX queue
+
+mt76_tx() assumes the WCID it is handed went through mt76_wcid_init(),
+which sets up tx_pending and tx_list. mt7603 publishes its private global
+station WCID without that call, so the very first frame that lands on it
+(injected monitor frames with neither a station nor a vif) hits
+__skb_queue_tail() with a zeroed sk_buff_head and faults on the NULL prev
+pointer.
+
+0010 fixes mt7603, but the same assumption is shared by every driver in
+the tree and a stale WCID is a one-frame reboot on MT7628. Detect the
+uninitialised queue and set it up lazily instead of crashing; the fast
+path is a single pointer comparison.
+
+--- a/tx.c
++++ b/tx.c
+@@ -345,11 +345,26 @@ mt76_tx(struct mt76_phy *phy, struct ieee80211_sta *sta,
+ 
+ 	info->hw_queue |= FIELD_PREP(MT_TX_HW_QUEUE_PHY, phy->band_idx);
+ 
++	/*
++	 * A WCID can be published without mt76_wcid_init() (mt7603's global
++	 * station WCID is one such case). Queueing on a zeroed sk_buff_head
++	 * dereferences a NULL prev pointer and panics the kernel.
++	 * A zeroed spinlock is unlocked, so it is safe to take it here.
++	 */
++	if (unlikely(!wcid->tx_pending.next)) {
++		spin_lock_bh(&wcid->tx_pending.lock);
++		if (!wcid->tx_pending.next)
++			__skb_queue_head_init(&wcid->tx_pending);
++		spin_unlock_bh(&wcid->tx_pending.lock);
++	}
++
+ 	spin_lock_bh(&wcid->tx_pending.lock);
+ 	__skb_queue_tail(&wcid->tx_pending, skb);
+ 	spin_unlock_bh(&wcid->tx_pending.lock);
+ 
+ 	spin_lock_bh(&phy->tx_lock);
++	if (unlikely(!wcid->tx_list.next))
++		INIT_LIST_HEAD(&wcid->tx_list);
+ 	if (list_empty(&wcid->tx_list))
+ 		list_add_tail(&wcid->tx_list, &phy->tx_list);
+ 	spin_unlock_bh(&phy->tx_lock);

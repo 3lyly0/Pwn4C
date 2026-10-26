@@ -184,6 +184,20 @@ cd Pwn4C/firmware
 ./build.sh
 ```
 
+`build.sh` automatically installs the patched `mt76` kernel modules from
+`firmware/prebuilt/` — they fix the MT7628 panic on the first injected deauth
+frame (see [troubleshooting](troubleshooting.md#deauth-reboots-the-drone-mt7628-mt76-injection-crash)).
+If that directory is empty, build them once with the matching OpenWrt SDK
+(~10 minutes, needs ~4 GB free):
+
+```bash
+cd Pwn4C/firmware
+./build-mt76-kmod.sh
+```
+
+Without those ipks the image still builds and runs, but `deauth` will reboot
+the drone.
+
 See [firmware/README.md](../firmware/README.md) for build dependencies.
 
 ### B.2 Flash via TFTP (Stock Recovery Mode)

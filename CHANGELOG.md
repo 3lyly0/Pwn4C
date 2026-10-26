@@ -6,6 +6,13 @@ v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
 ## [Unreleased]
 
 ### Fixed
+- **`deauth` rebooting the drone:** the stock 23.05.5 `mt7603` driver never
+  initialises the global station WCID it hands to `mt76_tx()` for injected
+  monitor frames, so the first deauth queued the skb on a zeroed
+  `sk_buff_head` and panicked the MIPS core (`BadVA : 00000000`,
+  `epc : mt76_tx`). The image now ships patched `kmod-mt76-core`/`kmod-mt7603`
+  (backport of upstream `c50f17ec046e` plus a defensive queue guard), built
+  by `firmware/build-mt76-kmod.sh`.
 - **Radio left administratively down after a capture session:** at boot the
   daemon starts with `radio_mode = RADIO_DOWN` while netifd has already applied
   the saved wireless profile, so the first `listen`/`deauth`/`networks` saved

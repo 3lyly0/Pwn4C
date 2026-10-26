@@ -789,6 +789,70 @@ ssh root@192.168.4.1 "logread | grep -E 'pwn4cd|procd' | tail -20"
 pwn4c status
 ```
 
+### `deauth` reboots the drone (MT7628 mt76 injection crash)
+
+Symptom: the drone survives `monitor` and `listen`, but the first `deauth`
+burst drops the control connection and the board comes back with
+`uptime` near zero. `/root/pwn4c-trace.log` ends at the injection line with
+no `exit-monitor`:
+
+```
+[... ] enter-monitor saved=1 daemon=1
+[... ] monitor-active
+[... ] [inject] frames=10 interval_ms=10 queued=10 sent=0 failed=0
+```
+
+This is a kernel bug in the stock 23.05.5 `mt7603` driver, not in the
+daemon. `mt7603` publishes a private "global station" WCID and never calls
+`mt76_wcid_init()` on it. Frames injected through a monitor vif have neither
+a station nor a vif, so `mt7603_tx()` hands that WCID to `mt76_tx()`, which
+queues the skb on a zeroed `sk_buff_head`; `__skb_queue_tail()` then
+dereferences a NULL `prev` and the MIPS core panics (`BadVA : 00000000`,
+`epc : mt76_tx+0xa4`), the watchdog reboots the board, and `logread` loses
+everything because it only lives in RAM.
+
+Any single injected frame is enough — lowering `count` does not avoid it,
+and `NL80211_CMD_FRAME` takes the same path.
+
+The image now ships fixed kernel modules built by
+`firmware/build-mt76-kmod.sh`:
+
+- `0010-mt7603-init-global-station-wcid.patch` — backport of upstream
+  `c50f17ec046e ("wifi: mt76: mt7603: initialize global station WCID")`,
+  which calls `mt76_wcid_init()` before publishing the WCID.
+- `0011-mt76-tx-guard-uninitialised-wcid-queue.patch` — `mt76_tx()` sets up
+  `tx_pending`/`tx_list` if it is ever handed another uninitialised WCID,
+  instead of panicking.
+
+Verify the patched build is installed (release `-2`, not `-1`):
+
+```bash
+ssh root@192.168.4.1 "opkg list-installed | grep -E 'kmod-mt76-core|kmod-mt7603'"
+# kmod-mt7603 - 5.15.167+2024-04-03-1e336a85-2
+# kmod-mt76-core - 5.15.167+2024-04-03-1e336a85-2
+```
+
+Then retest; `uptime` must keep counting and the trace must show
+`exit-monitor` after `[inject]`:
+
+```bash
+pwn4c monitor
+pwn4c deauth --bssid <AP_BSSID> --client <CLIENT_MAC> --count 10
+pwn4c status
+ssh root@192.168.4.1 "tail -5 /root/pwn4c-trace.log; uptime"
+```
+
+Rebuild the modules after changing the patches:
+
+```bash
+cd firmware
+./build-mt76-kmod.sh      # writes prebuilt/*.ipk + checksums.sha256
+./build.sh                # bakes them into the sysupgrade image
+```
+
+`build.sh` fails its manifest assertion if the stock `-1` package would end
+up in the image, so a firmware without the fix cannot be shipped silently.
+
 ### `pwn4c upgrade` fails at verification
 
 - `UPGRADE_DOWNLOAD_FAILED` — the drone could not fetch the image from the
