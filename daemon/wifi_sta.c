@@ -30,6 +30,8 @@
 
 #define STA_IFACE          "pwn4c_sta"      /* UCI section name                 */
 #define STA_NETDEV         "phy0-sta0"      /* netdev created by mac80211       */
+#define STA_PHY            "phy0"           /* radio phy (wpa_supplicant ubus)  */
+#define STA_WPA_GLOBAL     "/var/run/wpa_supplicant/global"
 #define STA_CMD_MAX        2048
 #define STA_CONNECT_TIMEOUT_SECS  75
 #define STA_DISCONNECT_TIMEOUT_SECS 20
@@ -113,9 +115,9 @@ static bool sta_is_hex64(const char *s)
 }
 
 /*
- * kv_get — Read one "key=value" line from wpa_cli output. wpa_cli -i ...
- * status returns exactly that format. Values may contain '='; only the first
- * one separates key from value.
+ * kv_get — Read one "key=value" line from wpa_cli output. `wpa_cli status`
+ * returns exactly that format. Values may contain '='; only the first one
+ * separates key from value.
  */
 static int kv_get(const char *text, const char *key, char *out, size_t n)
 {
@@ -146,6 +148,98 @@ static int kv_get(const char *text, const char *key, char *out, size_t n)
     }
 
     return -1;
+}
+
+/*
+ * sta_channel_from_freq — Operating channel for a centre frequency, or 0.
+ */
+static int sta_channel_from_freq(int freq)
+{
+    if (freq >= 2412 && freq <= 2472)  { return (freq - 2407) / 5; }
+    if (freq == 2484)                  { return 14; }
+    if (freq >= 5000 && freq <= 5900)  { return (freq - 5000) / 5; }
+    if (freq >= 5955 && freq <= 7115)  { return (freq - 5950) / 5; }
+    return 0;
+}
+
+/*
+ * sta_wpa_cmd — Run one wpa_supplicant control command, capture its reply.
+ *
+ * OpenWrt 23.05 starts a single supplicant with a *global* control socket
+ * (`wpa_supplicant -n -s -g /var/run/wpa_supplicant/global`) and creates no
+ * per-interface socket. `wpa_cli -i phy0-sta0 ...` therefore fails with
+ * "No such file or directory". Commands on the global socket must carry an
+ * `IFNAME=<ifname>` prefix, which wpa_cli accepts as its first argument and
+ * forwards to the matching interface.
+ *
+ * Older images (or a hand-started supplicant with `-C`) do expose a
+ * per-interface socket, so fall back to `wpa_cli -i` before giving up.
+ *
+ * Returns 0 only when the command produced a real reply. A "FAIL" answer
+ * (unknown interface/command) is treated as unavailable, as is a missing
+ * socket, so callers can move on to another source.
+ */
+static int sta_wpa_cmd(const char *cmd, char *out, size_t outsz)
+{
+    char line[STA_CMD_MAX];
+
+    if (!cmd || !out || outsz == 0) { return -1; }
+
+    (void)snprintf(line, sizeof(line),
+                   "wpa_cli -g %s IFNAME=%s %s 2>/dev/null",
+                   STA_WPA_GLOBAL, STA_NETDEV, cmd);
+    if (util_run_cmd_capture(line, out, outsz, 3) == 0
+        && strncmp(out, "FAIL", 4) != 0) {
+        return 0;
+    }
+
+    (void)snprintf(line, sizeof(line),
+                   "wpa_cli -i %s %s 2>/dev/null", STA_NETDEV, cmd);
+    if (util_run_cmd_capture(line, out, outsz, 3) == 0
+        && strncmp(out, "FAIL", 4) != 0) {
+        return 0;
+    }
+
+    out[0] = '\0';
+    return -1;
+}
+
+/*
+ * sta_wpa_state_ubus — Handshake state from the wpa_supplicant ubus object.
+ *
+ * Fallback for images built without wpa-cli. `phy_status` reports the
+ * supplicant state machine for the interface on the phy, plus its operating
+ * frequency. The reply also names the interface; ignore it when it is not the
+ * station netdev so a phy shared with the AP cannot be misread.
+ */
+static int sta_wpa_state_ubus(char *state, size_t statesz, int *freq)
+{
+    char obj[512];
+    char ifname[32];
+
+    if (freq) { *freq = 0; }
+    if (!state || statesz == 0) { return -1; }
+    state[0] = '\0';
+
+    if (util_run_cmd_capture(
+            "ubus call wpa_supplicant phy_status '{\"phy\":\"" STA_PHY "\"}' 2>/dev/null",
+            obj, sizeof(obj), 3) != 0) {
+        return -1;
+    }
+    if (json_get_str(obj, "state", state, statesz) < 0 || state[0] == '\0') {
+        return -1;
+    }
+
+    if (json_get_str(obj, "ifname", ifname, sizeof(ifname)) == 0
+        && ifname[0] != '\0' && strcmp(ifname, STA_NETDEV) != 0) {
+        state[0] = '\0';
+        return -1;
+    }
+
+    if (freq) {
+        (void)json_get_int(obj, "frequency", freq);
+    }
+    return 0;
 }
 
 /* ── Public API ───────────────────────────────────────────────────────────── */
@@ -332,9 +426,11 @@ int wifi_sta_connect(daemon_t *d, const char *ssid, const char *psk,
  * associates, which is *before* the PSK is verified; reporting that as
  * "connected" made a wrong password look like a successful join.
  *
- * wpa_cli is the primary source (wpa_state=COMPLETED means the 4-way
- * handshake succeeded). When it is unavailable (older images) the function
- * falls back to `iw` and requires a DHCP address before claiming success.
+ * wpa_supplicant is the primary source (`wpa_state=COMPLETED` means the 4-way
+ * handshake succeeded), queried over its global control socket; the ubus
+ * `wpa_supplicant` object is the fallback when wpa-cli is not installed. When
+ * neither is available the function falls back to `iw` and requires a DHCP
+ * address before claiming success.
  *
  * Extra JSON fields:
  *   associated — 802.11 association exists (may still be authenticating)
@@ -358,6 +454,7 @@ int wifi_sta_status(daemon_t *d, char *out_json, size_t outsz)
     char kv_freq[16] = "";
     bool iw_assoc = false;
     bool wpa_available = false;
+    bool wpa_cli_ok = false;
     bool authenticated = false;
     bool associated = false;
     bool auth_failed = false;
@@ -396,33 +493,46 @@ int wifi_sta_status(daemon_t *d, char *out_json, size_t outsz)
 
         p = strstr(link, "freq: ");
         if (p) {
-            int freq = atoi(p + strlen("freq: "));
-            if (freq >= 2412 && freq <= 2472) {
-                channel = (freq - 2407) / 5;
-            } else if (freq == 2484) {
-                channel = 14;
+            channel = sta_channel_from_freq(atoi(p + strlen("freq: ")));
+        }
+    }
+
+    /*
+     * 2. Authoritative handshake state from wpa_supplicant.
+     *
+     *    `wpa_state=COMPLETED` is only reported after the 4-way handshake
+     *    succeeded, so it is the signal the CLI waits for. The supplicant is
+     *    queried through its global control socket (see sta_wpa_cmd), with
+     *    the ubus object as a fallback on images without wpa-cli.
+     */
+    if (sta_wpa_cmd("status", wpa, sizeof(wpa)) == 0
+        && kv_get(wpa, "wpa_state", wpa_state, sizeof(wpa_state)) == 0) {
+        wpa_cli_ok = true;
+        wpa_available = true;
+    } else {
+        int ubus_freq = 0;
+
+        wpa[0] = '\0';
+        if (sta_wpa_state_ubus(wpa_state, sizeof(wpa_state), &ubus_freq) == 0) {
+            wpa_available = true;
+            if (channel == 0 && ubus_freq > 0) {
+                channel = sta_channel_from_freq(ubus_freq);
             }
         }
     }
 
-    /* 2. Authoritative handshake state from wpa_supplicant */
-    if (util_run_cmd_capture("wpa_cli -i " STA_NETDEV " status 2>/dev/null",
-                             wpa, sizeof(wpa), 3) == 0
-        && kv_get(wpa, "wpa_state", wpa_state, sizeof(wpa_state)) == 0) {
-        wpa_available = true;
-
-        if (kv_get(wpa, "ssid", kv_ssid, sizeof(kv_ssid)) == 0 && kv_ssid[0]) {
-            (void)snprintf(ssid_str, sizeof(ssid_str), "%s", kv_ssid);
-        }
-        if (kv_get(wpa, "bssid", kv_bssid, sizeof(kv_bssid)) == 0 && kv_bssid[0]) {
-            (void)snprintf(bssid_str, sizeof(bssid_str), "%s", kv_bssid);
-        }
-        if (kv_get(wpa, "freq", kv_freq, sizeof(kv_freq)) == 0 && kv_freq[0]) {
-            int freq = atoi(kv_freq);
-            if (freq >= 2412 && freq <= 2472) {
-                channel = (freq - 2407) / 5;
-            } else if (freq == 2484) {
-                channel = 14;
+    if (wpa_available) {
+        /* wpa_cli status can also supply the SSID/BSSID/frequency */
+        if (wpa_cli_ok) {
+            if (kv_get(wpa, "ssid", kv_ssid, sizeof(kv_ssid)) == 0 && kv_ssid[0]) {
+                (void)snprintf(ssid_str, sizeof(ssid_str), "%s", kv_ssid);
+            }
+            if (kv_get(wpa, "bssid", kv_bssid, sizeof(kv_bssid)) == 0 && kv_bssid[0]) {
+                (void)snprintf(bssid_str, sizeof(bssid_str), "%s", kv_bssid);
+            }
+            if (kv_get(wpa, "freq", kv_freq, sizeof(kv_freq)) == 0 && kv_freq[0]) {
+                int ch = sta_channel_from_freq(atoi(kv_freq));
+                if (ch > 0) { channel = ch; }
             }
         }
 
@@ -440,14 +550,13 @@ int wifi_sta_status(daemon_t *d, char *out_json, size_t outsz)
          * error instead of a generic "not connected".
          */
         if (!authenticated
-            && util_run_cmd_capture("wpa_cli -i " STA_NETDEV " list_networks 2>/dev/null",
-                                    nets, sizeof(nets), 3) == 0
+            && sta_wpa_cmd("list_networks", nets, sizeof(nets)) == 0
             && strstr(nets, "[TEMP-DISABLED]") != NULL) {
             auth_failed = true;
             associated = false;
         }
     } else {
-        /* No wpa_cli: association from iw; require a lease for "connected". */
+        /* No supplicant control channel: association from iw only. */
         associated = iw_assoc;
         authenticated = false;
     }

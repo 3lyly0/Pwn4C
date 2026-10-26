@@ -1377,12 +1377,20 @@ void ctrl_send(daemon_t *d, const char *json_line)
 
 void ctrl_close_client(daemon_t *d)
 {
+    bool was_monitoring = (d->state == STATE_MONITORING
+                           || d->state == STATE_INJECTING
+                           || d->radio_mode == RADIO_MONITOR);
+
     if (d->ctrl_client_fd >= 0) {
         close(d->ctrl_client_fd);
         d->ctrl_client_fd = -1;
     }
-    ctrl_teardown_monitor(d);
-    util_log("ctrl", "client gone — monitor stopped, radio restored");
+    if (was_monitoring) {
+        ctrl_teardown_monitor(d);
+        util_log("ctrl", "client gone — monitor stopped, radio restored");
+    } else {
+        util_log("ctrl", "client gone");
+    }
     d->state         = STATE_IDLE;
     d->client_authed = false;
     d->host_ip       = 0;

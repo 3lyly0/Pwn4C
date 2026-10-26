@@ -661,6 +661,27 @@ pwn4c wifi-status
   corrected password is retried immediately instead of waiting out
   wpa_supplicant's 600-second BSSID blacklist.
 
+### Inspecting the station supplicant
+
+OpenWrt 23.05 runs `wpa_supplicant` with a single **global** control socket
+(`/var/run/wpa_supplicant/global`) and creates no per-interface socket, so
+`wpa_cli -i phy0-sta0 ...` fails with `Failed to connect to non-global
+ctrl_ifname: phy0-sta0`. Prefix the request with `IFNAME=` on the global socket
+instead:
+
+```bash
+ssh root@192.168.4.1 \
+  "wpa_cli -g /var/run/wpa_supplicant/global IFNAME=phy0-sta0 status"
+ssh root@192.168.4.1 \
+  "wpa_cli -g /var/run/wpa_supplicant/global IFNAME=phy0-sta0 list_networks"
+ssh root@192.168.4.1 "ubus call wpa_supplicant phy_status '{\"phy\":\"phy0\"}'"
+```
+
+`wpa_state=COMPLETED` means the 4-way handshake succeeded; a network flagged
+`[TEMP-DISABLED]` means the AP rejected the key. `WIFI_STATUS` reads the same
+sources (falling back to ubus, then `iw`) and only reports `connected` after
+`COMPLETED` plus a DHCP lease.
+
 ### `pwn4c connect` joins but no IP is assigned
 
 The CLI now waits for both the 4-way handshake and a DHCP lease. If it
