@@ -45,6 +45,7 @@ Pwn4C converts a stock Xiaomi Mi Router 4C (MediaTek MT7628N, ~$15 USD) into a h
 | `wifi-status` | `pwn4c wifi-status` | Shows the drone's upstream station link (SSID/BSSID/channel/IP) |
 | `wifi-disconnect` | `pwn4c wifi-disconnect` | Leaves the upstream network; radio returns to the idle state |
 | `upgrade` | `pwn4c upgrade --image sysupgrade.bin` | Verified OTA firmware update (SHA-256 checked, waits for the reboot) |
+| `reboot` | `pwn4c reboot [-y] [--no-wait]` | Reboots the drone and waits for it to re-announce |
 | `shell` | `pwn4c shell` | Interactive single-session menu for all of the above |
 
 ---

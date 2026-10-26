@@ -93,15 +93,15 @@ The drone must be reachable over the LAN link (usually 192.168.4.1).`,
 			return
 		}
 
-		waitForDroneAfterUpgrade(target)
+		waitForDroneToReturn(target, upgradeBootWait)
 	},
 }
 
-// waitForDroneAfterUpgrade polls discovery until the drone is back, then
-// reports the freshly booted firmware version.
-func waitForDroneAfterUpgrade(target string) {
-	fmt.Printf("[*] Waiting up to %ds for the drone to come back online...\n", upgradeBootWait)
-	deadline := time.Now().Add(time.Duration(upgradeBootWait) * time.Second)
+// waitForDroneToReturn polls discovery until the drone is back, then reports
+// the freshly booted firmware version. Used after upgrade and reboot.
+func waitForDroneToReturn(target string, waitSeconds int) {
+	fmt.Printf("[*] Waiting up to %ds for the drone to come back online...\n", waitSeconds)
+	deadline := time.Now().Add(time.Duration(waitSeconds) * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(5 * time.Second)
 		remaining := int(time.Until(deadline).Seconds())

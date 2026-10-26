@@ -20,6 +20,11 @@ v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
 - `nftables` and `kmod-nft-nat` are now part of the firmware image. `firewall4`
   stays excluded; the manifest assertions require `nftables` and still reject
   the zone model.
+- **`pwn4c reboot`:** the daemon and control client already supported `REBOOT`
+  and the interactive shell exposed it, but there was no top-level command, so
+  `pwn4c reboot` failed with `unknown command`. It now reboots the drone,
+  confirms first unless `--yes` is given, and waits for the drone to
+  re-announce (or returns immediately with `--no-wait`).
 
 ## [1.3.3] - 2026-10-26
 
