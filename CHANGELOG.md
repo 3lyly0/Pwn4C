@@ -6,6 +6,21 @@ v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
 ## [Unreleased]
 
 ### Fixed
+- **Empty handshake captures:** `deauth --monitor` now refuses the broadcast
+  client default, because most clients ignore group-addressed deauth frames and
+  stay associated. Pass `-c <CLIENT_MAC>`, or `--all-clients` to opt into a
+  broadcast burst deliberately. The interactive `deauth` menu asks for a client
+  MAC too, warns before a broadcast burst, and applies the selected BSSID as a
+  capture filter. Group/multicast client addresses are rejected, since they are
+  never a valid single-client target.
+- **Misleading TX reporting:** `deauth` now prints how many frames were
+  *queued* (and how many were accepted synchronously), waits for the paced ring
+  to drain, and then reports the real delta of the drone's TX counter instead of
+  claiming `Transmitted: 0` for frames that leave asynchronously.
+- **BPF filter leaking between sessions:** the daemon keeps filter state across
+  monitor sessions, so a `--filter-bssid` run silently narrowed later captures.
+  `monitor` and `deauth --monitor` now clear an inherited filter when none is
+  requested.
 - **`deauth` rebooting the drone:** the stock 23.05.5 `mt7603` driver never
   initialises the global station WCID it hands to `mt76_tx()` for injected
   monitor frames, so the first deauth queued the skb on a zeroed
@@ -28,6 +43,10 @@ v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
   the TX drain instead of claiming the burst was sent.
 
 ### Added
+- **BPF filtering for `deauth --monitor`:** `--filter-bssid <AP_BSSID>` and
+  `--mgmt-only` narrow the capture on the drone, matching the options that
+  `monitor` already had. The BSSID filter checks Addr1/Addr2/Addr3, so EAPOL
+  frames survive it; `--mgmt-only` warns because it excludes the handshake.
 - **Persistent radio trace:** `util_trace` appends rare state transitions
   (monitor enter/exit, injection, teardown) to `/root/pwn4c-trace.log`, which
   survives a watchdog reset or kernel panic — the RAM-only `logread` does not.

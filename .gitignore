@@ -33,6 +33,13 @@ output/
 # Go
 /vendor/
 
+# Python
+__pycache__/
+*.pyc
+
+# Local-only helper scripts (kept out of the published repo)
+/tools/*.py
+
 # C build artifacts (daemon)
 /daemon/*.o
 /daemon/pwn4cd

