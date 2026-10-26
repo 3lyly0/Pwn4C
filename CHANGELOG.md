@@ -3,7 +3,7 @@
 All notable changes to Pwn4C are documented here. For releases prior to
 v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
 
-## [Unreleased]
+## [1.3.3] - 2026-10-26
 
 ### Fixed
 - **Empty handshake captures:** `deauth --monitor` now refuses the broadcast
