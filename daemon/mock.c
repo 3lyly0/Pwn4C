@@ -94,5 +94,5 @@ void mock_sta_status_json(char *out, size_t n)
     (void)snprintf(out, n,
         "{\"connected\":true,\"ssid\":\"mock-uplink\","
         "\"bssid\":\"02:00:00:de:ad:09\",\"ip\":\"192.168.1.44\","
-        "\"channel\":11,\"mode\":\"sta\"}");
+        "\"channel\":11,\"mode\":\"sta\",\"sharing\":true}");
 }

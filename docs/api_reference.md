@@ -761,7 +761,8 @@ monitor session is torn down first.
     "ssid": "MyNetwork",
     "psk": "wireless-password",
     "bssid": "AA:BB:CC:DD:EE:FF",
-    "encryption": "psk2"
+    "encryption": "psk2",
+    "share": true
   }
 }
 ```
@@ -772,12 +773,20 @@ monitor session is torn down first.
 | `psk` | string | No | WPA passphrase (8-63 chars) or a 64-hex PSK. Omit or empty = open network |
 | `bssid` | string | No | Pin a specific AP |
 | `encryption` | string | No | Override UCI encryption: `psk2` (default), `psk`, `psk-mixed`, `sae`, `sae-mixed` |
+| `share` | boolean | No | NAT `192.168.4.0/24` behind the station link so LAN hosts reach the internet. Default `true`; a daemon older than v1.4.0 ignores it |
 
 **Response:** `{"connecting": true, "ssid": "MyNetwork"}` — association
 completes asynchronously; poll `WIFI_STATUS`.
 
 The stock AP profile is never modified — only its `disabled` flag is toggled
 while the station is up.
+
+With `share` the daemon runs `/usr/lib/pwn4c/share.sh on` after writing the
+profile. The image ships without `firewall4`, so there is no zone model: the
+script installs one nftables table with a postrouting `masquerade` on
+`phy0-sta0` and an MSS clamp. `WIFI_DISCONNECT` removes it. Sharing is not
+persistent across a reboot, because `pwn4c-radio` returns the radio to the
+boot-safe DOWN state on every boot.
 
 ---
 
@@ -798,7 +807,8 @@ Reports the drone's upstream station link.
   "mode": "sta",
   "state": "connected",
   "error": "",
-  "wpa_state": "COMPLETED"
+  "wpa_state": "COMPLETED",
+  "sharing": true
 }
 ```
 
@@ -809,6 +819,7 @@ Reports the drone's upstream station link.
 | `state` | `connected`, `dhcp` (key accepted, no lease yet), `associating`, `auth_failed`, `disconnected` |
 | `error` | `auth_failed` when the AP rejected the key and wpa_supplicant temporary-disabled the network |
 | `wpa_state` | Raw `wpa_cli status` state (`COMPLETED`, `4WAY_HANDSHAKE`, ...) when available |
+| `sharing` | `true` when the LAN is NATed behind the station link (firmware v1.4.0+; absent on older images) |
 
 Because `connected` is set from `wpa_state=COMPLETED`, a bare association no
 longer looks like a successful join. Callers that need end-to-end

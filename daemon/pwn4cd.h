@@ -327,7 +327,8 @@ int     scan_parse_beacon(const uint8_t *frame, size_t len,
 
 /* wifi_sta.c — managed station mode (WIFI_CONNECT / STATUS / DISCONNECT)   */
 int     wifi_sta_connect(daemon_t *d, const char *ssid, const char *psk,
-                         const char *bssid, const char *encryption);
+                         const char *bssid, const char *encryption,
+                         bool share);
 int     wifi_sta_status(daemon_t *d, char *out_json, size_t out_sz);
 int     wifi_sta_disconnect(daemon_t *d);
 

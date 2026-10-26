@@ -753,6 +753,31 @@ ssh root@192.168.4.1 "logread | grep -i dhcp"
 The daemon waits for `phy0-sta0` to exist before running `ifup wan`, then
 retries the logical interface once if no address appears.
 
+### `pwn4c connect` joins but the host on the LAN has no internet
+
+Check `pwn4c wifi-status`: it prints `LAN sharing: enabled` when the NAT table
+is installed. If it says disabled, either `--no-share` was used or the image
+predates v1.4.0 (no `nft`, so nothing can masquerade).
+
+The drone routes out on its own but `192.168.4.0/24` is unroutable upstream:
+the upstream router has no route back, so replies to forwarded packets are
+dropped. The image ships without `firewall4`, so sharing is a single nftables
+table rather than a firewall zone:
+
+```bash
+ssh root@192.168.4.1 "/usr/lib/pwn4c/share.sh on; /usr/lib/pwn4c/share.sh status"
+ssh root@192.168.4.1 "nft list table ip pwn4c_share; sysctl net.ipv4.ip_forward"
+```
+
+If `nft` is missing, the firmware is older than v1.4.0 and must be reflashed.
+If the table exists but the host still stalls, check the host's own gateway and
+DNS: it must use `192.168.4.1` as both, and the drone's `dnsmasq` forwards to
+whatever DNS the upstream DHCP lease provided.
+
+Sharing is not restored across a reboot: `pwn4c-radio` returns the radio to the
+boot-safe DOWN state on every boot, so the station link and the NAT table both
+have to be recreated with `pwn4c connect`.
+
 ### `pwn4c connect` still cannot associate
 
 1. **Hidden network** — supported: pass the SSID normally; the profile sets

@@ -927,6 +927,7 @@ static void cmd_wifi_connect(daemon_t *d, const char *id, const char *params)
     char enc[32];
     char esc_ssid[SCAN_SSID_MAX * 2 + 2];
     char data[160];
+    int  share = 1;
 
     if (d->mock_mode) {
         send_ok(d, id, "{\"connecting\":true,\"mock\":true}");
@@ -941,8 +942,12 @@ static void cmd_wifi_connect(daemon_t *d, const char *id, const char *params)
     (void)json_get_str(params, "psk", psk, sizeof(psk));
     (void)json_get_str(params, "bssid", bssid, sizeof(bssid));
     (void)json_get_str(params, "encryption", enc, sizeof(enc));
+    /* Absent means "share" (the CLI default); json_get_int zeroes on miss. */
+    if (json_get_int(params, "share", &share) < 0) {
+        share = 1;
+    }
 
-    if (wifi_sta_connect(d, ssid, psk, bssid, enc) < 0) {
+    if (wifi_sta_connect(d, ssid, psk, bssid, enc, share != 0) < 0) {
         send_error(d, id, "INTERFACE_ERROR",
                    "Failed to configure the station profile (see logread)");
         return;

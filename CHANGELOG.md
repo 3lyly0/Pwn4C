@@ -3,6 +3,24 @@
 All notable changes to Pwn4C are documented here. For releases prior to
 v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
 
+## [Unreleased]
+
+### Added
+- **LAN sharing on `pwn4c connect`:** joining an upstream network now also
+  NATs `192.168.4.0/24` behind the station link, so a host plugged into a LAN
+  port reaches the internet through the drone's Wi-Fi. The image ships without
+  `firewall4`, so there is no zone model and no masquerade: `connect` gave the
+  drone upstream connectivity while forwarded packets died on the return path,
+  because the upstream router has no route back to `192.168.4.0/24`. Sharing is
+  a single nftables table (`/usr/lib/pwn4c/share.sh`) with a postrouting
+  `masquerade` on `phy0-sta0` and an MSS clamp; `wifi-disconnect` removes it.
+  `--no-share` keeps the old isolated behaviour, and `wifi-status` reports
+  whether sharing is active. `WIFI_CONNECT` takes a `share` parameter and
+  `WIFI_STATUS` returns a `sharing` field.
+- `nftables` and `kmod-nft-nat` are now part of the firmware image. `firewall4`
+  stays excluded; the manifest assertions require `nftables` and still reject
+  the zone model.
+
 ## [1.3.3] - 2026-10-26
 
 ### Fixed

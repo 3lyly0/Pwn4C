@@ -19,6 +19,7 @@ var (
 	connectEncryption string
 	connectTimeout    int
 	connectTarget     string
+	connectNoShare    bool
 )
 
 var connectCmd = &cobra.Command{
@@ -27,6 +28,12 @@ var connectCmd = &cobra.Command{
 	Long: `Configures the drone radio as a station and associates it with the given
 network. The upstream link rides the wan interface, so the drone itself gains
 connectivity while the control channel stays on the Ethernet cable.
+
+By default the drone also NATs its LAN (192.168.4.0/24) behind that link, so a
+host plugged into a LAN port reaches the internet through the drone's Wi-Fi.
+The image ships without a firewall, so this is a single masquerade rule
+installed by /usr/lib/pwn4c/share.sh; pass --no-share to leave the LAN isolated
+and give the drone upstream access only.
 
 Hidden networks work the same way: pass the SSID and the drone will scan for
 it by name. If the password flag is omitted, the password is asked for
@@ -81,7 +88,8 @@ is up (or --timeout expires) and then prints the assigned IP.`,
 		}
 		fmt.Printf("[+] Joining %s...\n", label)
 		fmt.Println("[*] Restarting the radio and applying the station profile (can take ~30s)...")
-		if err := client.WifiConnect(ssid, password, connectBSSID, connectEncryption); err != nil {
+		share := !connectNoShare
+		if err := client.WifiConnect(ssid, password, connectBSSID, connectEncryption, share); err != nil {
 			fmt.Printf("[!] Connect failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -118,6 +126,13 @@ is up (or --timeout expires) and then prints the assigned IP.`,
 					fmt.Printf("    BSSID    : %s\n", st.BSSID)
 					fmt.Printf("    Channel  : %d\n", st.Channel)
 					fmt.Printf("    IP (wan) : %s\n", st.IP)
+					if st.Sharing {
+						fmt.Println("    Sharing  : enabled — hosts on 192.168.4.0/24 are NATed through this link")
+					} else if share {
+						fmt.Println("    Sharing  : requested but not active — run 'pwn4c wifi-status'")
+					} else {
+						fmt.Println("    Sharing  : disabled (--no-share); the LAN stays isolated")
+					}
 					return
 				}
 			}
@@ -146,6 +161,7 @@ func init() {
 	connectCmd.Flags().StringVar(&connectBSSID, "bssid", "", "Pin a specific AP by BSSID")
 	connectCmd.Flags().StringVar(&connectEncryption, "encryption", "", "Override UCI encryption (psk2, psk, psk-mixed, sae, sae-mixed)")
 	connectCmd.Flags().IntVar(&connectTimeout, "timeout", 60, "Seconds to wait for association and DHCP")
+	connectCmd.Flags().BoolVar(&connectNoShare, "no-share", false, "Do not NAT the drone's LAN behind the upstream link")
 	connectCmd.Flags().StringVarP(&connectTarget, "target", "t", "", "Target drone IP (defaults to auto-discovery)")
 	rootCmd.AddCommand(connectCmd)
 }

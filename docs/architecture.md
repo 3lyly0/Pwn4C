@@ -343,6 +343,8 @@ Only `disabled` flags are modified. The SSID, security, and channel settings sur
 
 **Station-mode exception (v1.3.0):** the daemon owns exactly one additional profile, `wireless.pwn4c_sta`. It is the only profile `WIFI_CONNECT` may create and `WIFI_DISCONNECT` may delete, because it exists solely for the drone's own upstream link. While the station is up, `wireless.default_radio0.disabled` is set to `1` (the AP stays quiet) and `network.wan` switches to `proto=dhcp`; both flags are restored on disconnect, and the radio returns to the boot-safe DOWN state.
 
+**LAN sharing (v1.4.0):** `WIFI_CONNECT` also NATs `192.168.4.0/24` behind the station link so hosts on the LAN ports reach the internet. The image excludes `firewall4` and therefore has no zone model or masquerade, so this is one nftables table installed by `/usr/lib/pwn4c/share.sh`: a postrouting `masquerade` on `phy0-sta0` plus an MSS clamp. `WIFI_DISCONNECT` deletes the table. `nftables` and `kmod-nft-nat` are in the image for this purpose; `firewall4` stays excluded and the build asserts it.
+
 ### Recovery Path
 
 If `pwn4cd` crashes without restoring the radio, the operator can recover with a single command over SSH:

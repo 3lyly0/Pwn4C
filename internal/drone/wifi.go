@@ -39,6 +39,9 @@ type WifiLinkStatus struct {
 	State      string `json:"state"`
 	Error      string `json:"error"`
 	WPAState   string `json:"wpa_state"`
+	// Sharing is true when the drone NATs 192.168.4.0/24 behind the station
+	// link. Always false on firmware older than v1.4.0.
+	Sharing bool `json:"sharing"`
 }
 
 // okOrError maps a failed BaseResponse onto a Go error.
@@ -77,10 +80,23 @@ func (c *ControlClient) ScanNetworks(dwellMs int) ([]WirelessNetwork, error) {
 // WifiConnect joins the drone to an upstream network. An empty password
 // selects an open network; bssid optionally pins a specific AP; encryption
 // overrides the default psk2 (allowed: psk2, psk, psk-mixed, sae, sae-mixed).
-// Association completes asynchronously — poll WifiStatus afterwards.
-func (c *ControlClient) WifiConnect(ssid, password, bssid, encryption string) error {
+// share NATs the drone's LAN behind the station link so a host plugged into a
+// LAN port reaches the internet. Association completes asynchronously — poll
+// WifiStatus afterwards.
+func (c *ControlClient) WifiConnect(ssid, password, bssid, encryption string, share bool) error {
+	resp, err := c.SendCommand("WIFI_CONNECT", wifiConnectParams(ssid, password, bssid, encryption, share))
+	if err != nil {
+		return err
+	}
+	return okOrError(resp, "WIFI_CONNECT")
+}
+
+// wifiConnectParams builds the WIFI_CONNECT payload. Split out so the wire
+// format can be asserted without a live drone.
+func wifiConnectParams(ssid, password, bssid, encryption string, share bool) map[string]interface{} {
 	params := map[string]interface{}{
-		"ssid": ssid,
+		"ssid":  ssid,
+		"share": share,
 	}
 	if password != "" {
 		params["psk"] = password
@@ -91,12 +107,7 @@ func (c *ControlClient) WifiConnect(ssid, password, bssid, encryption string) er
 	if encryption != "" {
 		params["encryption"] = encryption
 	}
-
-	resp, err := c.SendCommand("WIFI_CONNECT", params)
-	if err != nil {
-		return err
-	}
-	return okOrError(resp, "WIFI_CONNECT")
+	return params
 }
 
 // WifiStatus reports the drone's upstream station link state.

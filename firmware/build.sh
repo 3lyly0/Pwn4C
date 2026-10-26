@@ -68,7 +68,13 @@ fi
 # handshake (wpa_state=COMPLETED) from a bare association, and reports the
 # [TEMP-DISABLED] flag that a wrong PSK produces. Without it the daemon can
 # only fall back to `iw link`, which looks "connected" before authentication.
-PACKAGES="iw wpa-cli tcpdump-mini -ppp -ppp-mod-pppoe -firewall4 -odhcpd-ipv6only -odhcp6c -kmod-ipv6"
+#
+# nftables + kmod-nft-nat are not the firewall4 zone model: they provide the
+# `nft` binary and the masquerade expression that /usr/lib/pwn4c/share.sh uses
+# to NAT the LAN behind a joined station. Without them `pwn4c connect` gives the
+# drone internet but the host on 192.168.4.0/24 cannot route out. firewall4
+# itself stays banned (see the manifest assertions below).
+PACKAGES="iw wpa-cli tcpdump-mini nftables kmod-nft-nat -ppp -ppp-mod-pppoe -firewall4 -odhcpd-ipv6only -odhcp6c -kmod-ipv6"
 
 # Patched mt76 driver (monitor-mode TX fix). The stock 23.05.5 driver panics
 # MT7628 on the very first injected deauth frame; the fix is a kernel change,
@@ -194,7 +200,7 @@ MANIFEST="$IB_BIN_DIR/$(ls "$IB_BIN_DIR/" | grep '\.manifest$' | head -n 1)"
 if [ -f "$MANIFEST" ]; then
     echo ""
     echo "── Package manifest checks ──────────────────────────────────"
-    for req in iw wpa-cli tcpdump-mini dropbear dnsmasq kmod-mac80211; do
+    for req in iw wpa-cli tcpdump-mini dropbear dnsmasq kmod-mac80211 nftables; do
         if grep -q "^${req}" "$MANIFEST"; then
             echo "  [PASS] ${req} present"
         else

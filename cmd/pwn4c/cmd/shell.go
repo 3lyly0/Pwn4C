@@ -297,7 +297,7 @@ func (s *shellState) doConnect() {
 		fmt.Printf("[*] '%s' is not visible in the air — the drone will scan for it by name.\n", ssid)
 	}
 
-	if err := s.client.WifiConnect(ssid, password, "", ""); err != nil {
+	if err := s.client.WifiConnect(ssid, password, "", "", true); err != nil {
 		fmt.Printf("[!] Connect failed: %v\n", err)
 		return
 	}
@@ -308,6 +308,9 @@ func (s *shellState) doConnect() {
 		st, err := s.client.WifiStatus()
 		if err == nil && st.Connected {
 			fmt.Printf("[+] Joined '%s' — IP: %s (channel %d)\n", st.SSID, st.IP, st.Channel)
+			if st.Sharing {
+				fmt.Println("[+] LAN sharing active: hosts on 192.168.4.0/24 have internet via the drone.")
+			}
 			return
 		}
 		time.Sleep(2 * time.Second)
@@ -326,6 +329,11 @@ func (s *shellState) doWifiStatus() {
 		return
 	}
 	fmt.Printf("[+] Upstream: %s (BSSID %s, ch%d, IP %s)\n", st.SSID, st.BSSID, st.Channel, st.IP)
+	if st.Sharing {
+		fmt.Println("[+] LAN sharing: enabled (192.168.4.0/24 NATed through the upstream link)")
+	} else {
+		fmt.Println("[-] LAN sharing: disabled (hosts on 192.168.4.0/24 cannot route out)")
+	}
 }
 
 func (s *shellState) doLeave() {

@@ -35,6 +35,7 @@
 #define STA_CMD_MAX        2048
 #define STA_CONNECT_TIMEOUT_SECS  75
 #define STA_DISCONNECT_TIMEOUT_SECS 20
+#define SHARE_CMD          "/usr/lib/pwn4c/share.sh"
 
 /* Allowed UCI encryption values for the station profile */
 static const char *STA_ENCRYPTION_OK[] = {
@@ -256,9 +257,13 @@ static int sta_wpa_state_ubus(char *state, size_t statesz, int *freq)
  *
  * Returns 0 when the profile was applied (association/DHCP complete
  * asynchronously; poll WIFI_STATUS), -1 on configuration failure.
+ *
+ * `share` enables NAT for 192.168.4.0/24 behind the station link, so a host on
+ * the drone's LAN ports reaches the internet. The image ships no firewall, so
+ * without this the drone routes out but replies to forwarded packets are lost.
  */
 int wifi_sta_connect(daemon_t *d, const char *ssid, const char *psk,
-                     const char *bssid, const char *encryption)
+                     const char *bssid, const char *encryption, bool share)
 {
     char cmd[STA_CMD_MAX];
     char q_ssid[SCAN_SSID_MAX * 5 + 8];
@@ -415,6 +420,19 @@ int wifi_sta_connect(daemon_t *d, const char *ssid, const char *psk,
              ssid, enc, open_net ? "open" :
              (strcmp(enc, "sae") == 0 || strcmp(enc, "sae-mixed") == 0)
                  ? "passphrase" : "64-hex");
+
+    /*
+     * Apply sharing after the profile is written. The nft rule matches the
+     * station interface by name and is resolved per packet, so it does not
+     * need phy0-sta0 to exist yet. A failure here must not fail the join: the
+     * drone still has upstream connectivity, only the LAN stops routing out.
+     */
+    if (share) {
+        if (util_run_cmd_timeout(SHARE_CMD " on", 10) != 0) {
+            util_log("sta", "WIFI_CONNECT: sharing failed (nft missing or no netfilter)");
+        }
+    }
+
     return 0;
 }
 
@@ -438,6 +456,7 @@ int wifi_sta_connect(daemon_t *d, const char *ssid, const char *psk,
  *   error      — auth_failed when wpa_supplicant temporarily disabled the
  *                network after repeated handshake failures (wrong key)
  *   wpa_state  — raw wpa_supplicant state, when available
+ *   sharing    — true when the LAN is NATed behind the station link
  */
 int wifi_sta_status(daemon_t *d, char *out_json, size_t outsz)
 {
@@ -459,6 +478,7 @@ int wifi_sta_status(daemon_t *d, char *out_json, size_t outsz)
     bool associated = false;
     bool auth_failed = false;
     bool connected = false;
+    bool sharing = false;
     const char *state = "disconnected";
     int  channel = 0;
 
@@ -580,6 +600,9 @@ int wifi_sta_status(daemon_t *d, char *out_json, size_t outsz)
         (void)json_get_str(wan, "address", ip_str, sizeof(ip_str));
     }
 
+    /* 3b. LAN sharing: the nft table installed by share.sh, if any */
+    sharing = (util_run_cmd_timeout(SHARE_CMD " status", 5) == 0);
+
     /* 4. Derive the public state */
     if (auth_failed) {
         connected = false;
@@ -607,7 +630,8 @@ int wifi_sta_status(daemon_t *d, char *out_json, size_t outsz)
         (void)snprintf(out_json, outsz,
             "{\"connected\":%s,\"associated\":%s,\"ssid\":\"%s\","
             "\"bssid\":\"%s\",\"ip\":\"%s\",\"channel\":%d,\"mode\":\"sta\","
-            "\"state\":\"%s\",\"error\":\"%s\",\"wpa_state\":\"%s\"}",
+            "\"state\":\"%s\",\"error\":\"%s\",\"wpa_state\":\"%s\","
+            "\"sharing\":%s}",
             connected ? "true" : "false",
             associated ? "true" : "false",
             esc_ssid,
@@ -616,7 +640,8 @@ int wifi_sta_status(daemon_t *d, char *out_json, size_t outsz)
             channel,
             state,
             auth_failed ? "auth_failed" : "",
-            wpa_state);
+            wpa_state,
+            sharing ? "true" : "false");
     }
 
     if (connected || associated) {
@@ -634,6 +659,7 @@ int wifi_sta_disconnect(daemon_t *d)
     int r;
 
     char cmd[] =
+        SHARE_CMD " off; "
         "killall udhcpc 2>/dev/null; "
         "ifdown wan 2>/dev/null; "
         "uci -q delete wireless." STA_IFACE "; "
