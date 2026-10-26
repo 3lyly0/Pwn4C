@@ -105,6 +105,7 @@ int tx_queue_drain_step(daemon_t *d)
     slot = &d->tx_q.slots[d->tx_q.tail];
 
     if (d->mock_mode) {
+        d->inject_frames++;
         d->tx_q.tail = (d->tx_q.tail + 1u) % TX_QUEUE_MAX;
         d->tx_q.count--;
         return 1;
@@ -117,6 +118,7 @@ int tx_queue_drain_step(daemon_t *d)
     } while (n < 0 && errno == EINTR);
 
     if (n >= 0) {
+        d->inject_frames++;
         d->tx_q.tail = (d->tx_q.tail + 1u) % TX_QUEUE_MAX;
         d->tx_q.count--;
         return 1;
@@ -355,6 +357,7 @@ static void cmd_get_status(daemon_t *d, const char *id)
         "\"drone_id\":\"%s\","
         "\"rx_frames\":%llu,"
         "\"tx_frames\":%llu,"
+        "\"inject_frames\":%llu,"
         "\"ring_overruns\":%llu,"
         "\"inject_failures\":%llu,"
         "\"kernel_drops\":%lu,"
@@ -374,6 +377,7 @@ static void cmd_get_status(daemon_t *d, const char *id)
         drone_id,
         (unsigned long long)d->frames_captured,
         (unsigned long long)d->stream_seq,
+        (unsigned long long)d->inject_frames,
         (unsigned long long)d->ring_overruns,
         (unsigned long long)d->inject_failures,
         (unsigned long)kernel_drops,

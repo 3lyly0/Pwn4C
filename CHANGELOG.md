@@ -15,8 +15,12 @@ v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
   never a valid single-client target.
 - **Misleading TX reporting:** `deauth` now prints how many frames were
   *queued* (and how many were accepted synchronously), waits for the paced ring
-  to drain, and then reports the real delta of the drone's TX counter instead of
-  claiming `Transmitted: 0` for frames that leave asynchronously.
+  to drain, and then reports the real delta of the drone's new `inject_frames`
+  counter instead of claiming `Transmitted: 0` for frames that leave
+  asynchronously. The old `tx_frames` field is the stream sequence (frames
+  captured and sent to the host), so it never measured injection; `status` now
+  labels it `TX Stream Frames` and shows `Injected Frames` when the firmware
+  reports it.
 - **BPF filter leaking between sessions:** the daemon keeps filter state across
   monitor sessions, so a `--filter-bssid` run silently narrowed later captures.
   `monitor` and `deauth --monitor` now clear an inherited filter when none is

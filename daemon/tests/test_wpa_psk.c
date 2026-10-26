@@ -38,10 +38,10 @@ static void test_known_vectors(void)
           strcmp(hex, "0dc0d6eb90555ed6419756b9a15ec3e3"
                       "209b63df707dd508d14581f8982721af") == 0);
 
-    /* The exact key from the failing field report (special characters are
-     * just bytes to PBKDF2 — this exercises length/S-SID handling). */
-    CHECK("wpa_psk p@ssw0rd!/Test Network 123",
-          util_wpa_psk_hex("p@ssw0rd!", "Test Network 123", hex) == 0 &&
+    /* Special characters are just bytes to PBKDF2 — this exercises
+     * length and SSID handling without pinning a real network. */
+    CHECK("wpa_psk p@ssw0rd!/TestNet",
+          util_wpa_psk_hex("p@ssw0rd!", "TestNet", hex) == 0 &&
           strlen(hex) == 64);
 }
 

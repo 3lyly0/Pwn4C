@@ -73,7 +73,7 @@ is up (or --timeout expires) and then prints the assigned IP.`,
 		}
 
 		if _, err := net.ParseMAC(ssid); err == nil && connectBSSID == "" {
-			fmt.Printf("[i] Note: '%s' looks like a BSSID (MAC address). Wi-Fi connects using the network's SSID name (e.g. \"Test Network 123\").\n", ssid)
+			fmt.Printf("[i] Note: '%s' looks like a BSSID (MAC address). Wi-Fi connects using the network's SSID name (e.g. \"MyNetwork\").\n", ssid)
 		}
 		label := ssid
 		if password == "" {

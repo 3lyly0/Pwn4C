@@ -22,7 +22,7 @@ Pwn4C converts a stock Xiaomi Mi Router 4C (MediaTek MT7628N, ~$15 USD) into a h
 - **Kernel Classic BPF Frame Filtering (`--mgmt-only`, `--filter-bssid`)**: Attaches classic BPF bytecode (`SO_ATTACH_FILTER`) to the `AF_PACKET` socket in kernel space, filtering Management frames or target BSSIDs across Addr1/Addr2/Addr3 (preserving Data and WPA/EAPOL handshakes).
 - **Live Wireshark Pipe Streaming (`pwn4c monitor -o -`)**: Streams standard `DLT_IEEE802_11_RADIO` PCAP records directly to `stdout` for real-time inspection in Wireshark (`pwn4c monitor -c 6 -o - | wireshark -k -i -`).
 - **Active 802.11 Frame Injection & Deauth (`pwn4c deauth`)**: Enqueues raw 802.11 management frames into a 64-slot non-blocking TX ring buffer with configurable inter-frame pacing (`--interval`).
-- **Hardware-Level RF Control & Self-Healing (`pwn4c config`, `pwn4c status`)**: Direct `nl80211` and POSIX `ioctl` control over transmission power (1–20 dBm), dynamic MAC spoofing/randomization, automatic interface recovery on `ENETDOWN`/`ENODEV`, and full drop telemetry (`rx_frames`, `tx_frames`, `ring_overruns`, `kernel_drops`, `iface_recoveries`).
+- **Hardware-Level RF Control & Self-Healing (`pwn4c config`, `pwn4c status`)**: Direct `nl80211` and POSIX `ioctl` control over transmission power (1–20 dBm), dynamic MAC spoofing/randomization, automatic interface recovery on `ENETDOWN`/`ENODEV`, and full drop telemetry (`rx_frames`, `inject_frames`, `ring_overruns`, `kernel_drops`, `iface_recoveries`).
 - **Wi-Fi Survey & Station Mode (`pwn4c networks`, `pwn4c connect`)**: The drone sweeps the 2.4 GHz band from monitor mode and reports every AP — hidden networks included, with their advertised SSID length — then can join an upstream network as a station (hidden SSIDs supported) without ever touching the stock AP profile.
 - **Verified OTA Firmware Updates (`pwn4c upgrade`)**: Push a sysupgrade image from the host over the control channel; the drone verifies size and SHA-256 before flashing and comes back online on the new firmware.
 - **Interactive Shell (`pwn4c shell`)**: One persistent control session with a numbered menu — survey, select, join, listen, deauth-then-capture — instead of chains of separate commands and reconnects.
@@ -123,7 +123,7 @@ pwn4c config --power 20 --mac random
 pwn4c networks
 
 # Join the drone to an upstream network (or add a hidden one by name)
-pwn4c connect "Test Network 123" -p 's3cret-pass'
+pwn4c connect "MyNetwork" -p 's3cret-pass'
 pwn4c wifi-status
 
 # Update the drone firmware over the air and wait for it to come back

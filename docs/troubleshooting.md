@@ -704,7 +704,7 @@ The access point used the WPA 4-way handshake and rejected the key
 configured; correct it with:
 
 ```bash
-pwn4c connect "Test Network 123" "p@ssw0rd!" --encryption psk2
+pwn4c connect "MyNetwork" 's3cret-pass' --encryption psk2
 pwn4c wifi-status
 ```
 

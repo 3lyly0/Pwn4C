@@ -58,11 +58,16 @@ type StatusData struct {
 	FirmwareVersion string `json:"firmware_version"`
 	DroneID         string `json:"drone_id"`
 	RxFrames        uint64 `json:"rx_frames"`
-	TxFrames        uint64 `json:"tx_frames"`
-	RingOverruns    uint64 `json:"ring_overruns"`
-	InjectFailures  uint64 `json:"inject_failures"`
-	KernelDrops     uint32 `json:"kernel_drops"`
-	IfaceRecoveries uint64 `json:"iface_recoveries"`
+	// TxFrames is the legacy name for the stream sequence: frames captured and
+	// streamed to the host, not injected frames. Kept for older firmware.
+	TxFrames uint64 `json:"tx_frames"`
+	// InjectFrames is the cumulative count of frames the driver accepted for
+	// injection. Nil on firmware older than v1.3.3, which did not report it.
+	InjectFrames    *uint64 `json:"inject_frames"`
+	RingOverruns    uint64  `json:"ring_overruns"`
+	InjectFailures  uint64  `json:"inject_failures"`
+	KernelDrops     uint32  `json:"kernel_drops"`
+	IfaceRecoveries uint64  `json:"iface_recoveries"`
 }
 
 // DiagnosticsData represents system health in GET_DIAGNOSTICS

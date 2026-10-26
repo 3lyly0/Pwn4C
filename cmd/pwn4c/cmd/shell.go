@@ -183,7 +183,10 @@ func (s *shellState) doStatus() {
 	fmt.Printf(" Uptime           : %s\n",
 		(time.Duration(st.UptimeSeconds) * time.Second).Round(time.Second))
 	fmt.Printf(" Free RAM         : %d MB\n", st.FreeRAMBytes/(1024*1024))
-	fmt.Printf(" RX / TX Frames   : %d / %d\n", st.RxFrames, st.TxFrames)
+	fmt.Printf(" RX / Stream      : %d / %d\n", st.RxFrames, st.TxFrames)
+	if st.InjectFrames != nil {
+		fmt.Printf(" Injected Frames  : %d\n", *st.InjectFrames)
+	}
 	fmt.Println("=================================================")
 }
 
@@ -448,7 +451,7 @@ func (s *shellState) doListen(deauth bool) {
 
 		receiver, frames := s.startReceiver(outPath)
 		fmt.Printf("[+] Injecting %d deauth frames against %s...\n", count, bssid)
-		txBefore, txBeforeOK := readTxFrames(s.client)
+		txBefore, txBeforeOK := readInjectFrames(s.client)
 		sent, queued, failed, err := s.client.SendInjection(frameHex, count, 10)
 		if err != nil {
 			receiver.Close()

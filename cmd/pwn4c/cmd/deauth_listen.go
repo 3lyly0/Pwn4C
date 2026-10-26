@@ -67,7 +67,7 @@ func runDeauthWithListen(client *drone.ControlClient, frameHex string) {
 	fmt.Printf("    Client     : %s\n", destLabel)
 	fmt.Printf("    Channel    : %d\n", deauthChannel)
 
-	txBefore, txBeforeOK := readTxFrames(client)
+	txBefore, txBeforeOK := readInjectFrames(client)
 	sent, queued, failed, err := client.SendInjection(frameHex, deauthCount, deauthInterval)
 	if err != nil {
 		fmt.Printf("[!] Injection failed: %v\n", err)

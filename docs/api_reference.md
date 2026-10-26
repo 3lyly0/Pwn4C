@@ -191,6 +191,7 @@ Returns the current operational state of the Drone.
     "drone_id": "pwn4c-a3f7",
     "rx_frames": 12054,
     "tx_frames": 11980,
+    "inject_frames": 450,
     "ring_overruns": 0,
     "inject_failures": 0,
     "kernel_drops": 0
@@ -211,7 +212,8 @@ Returns the current operational state of the Drone.
 | `firmware_version` | string | Running firmware version |
 | `drone_id` | string | Drone identifier |
 | `rx_frames` | integer | Total frames captured into the ring buffer |
-| `tx_frames` | integer | Total frames successfully drained and streamed over UDP |
+| `tx_frames` | integer | Total frames successfully drained and streamed over UDP (legacy name: this is the stream sequence, not injections) |
+| `inject_frames` | integer | Cumulative frames the driver accepted for injection (firmware v1.3.3+) |
 | `ring_overruns` | integer | Frames dropped due to ring buffer saturation |
 | `inject_failures` | integer | Number of raw 802.11 injection failures |
 | `kernel_drops` | integer | Dropped frames reported by Linux socket `PACKET_STATISTICS` |
@@ -726,7 +728,7 @@ state. The response blocks until the sweep completes.
     "count": 2,
     "dwell_ms": 4000,
     "networks": [
-      {"ssid": "Test Network 123", "bssid": "aa:bb:cc:dd:ee:ff", "channel": 11,
+      {"ssid": "MyNetwork", "bssid": "aa:bb:cc:dd:ee:ff", "channel": 11,
        "signal_dbm": -52, "hidden": false},
       {"ssid": "", "bssid": "11:22:33:44:55:66", "channel": 6,
        "signal_dbm": -55, "hidden": true, "ssid_len": 8}

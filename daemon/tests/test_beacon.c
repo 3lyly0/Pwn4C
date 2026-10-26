@@ -90,16 +90,16 @@ static size_t build_beacon(const uint8_t *bssid, int channel,
 
 static void test_beacon_visible_ssid(void)
 {
-    static const uint8_t bssid[6] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
+    static const uint8_t bssid[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
     scan_net_t net;
-    size_t len = build_beacon(bssid, 6, "Test Network 123", NULL, 0);
+    size_t len = build_beacon(bssid, 6, "TestNet", NULL, 0);
 
     CHECK("visible: parse succeeds",
           scan_parse_beacon(frame_buf, len, 1, &net) == 0);
     CHECK("visible: ssid extracted",
-          strcmp(net.ssid, "Test Network 123") == 0);
+          strcmp(net.ssid, "TestNet") == 0);
     CHECK("visible: not hidden", net.hidden == false);
-    CHECK("visible: ssid_len matches", net.ssid_len == 16);
+    CHECK("visible: ssid_len matches", net.ssid_len == 7);
     CHECK("visible: bssid extracted",
           memcmp(net.bssid, bssid, 6) == 0);
     CHECK("visible: channel from DS IE", net.channel == 6);
@@ -165,7 +165,7 @@ static void test_beacon_rejects(void)
 
 static void test_beacon_extended_radiotap(void)
 {
-    static const uint8_t bssid[6] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x77};
+    static const uint8_t bssid[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x04};
     scan_net_t net;
     uint8_t buf[256];
     size_t off = 0;

@@ -162,7 +162,7 @@ func runPlainDeauth(client *drone.ControlClient, frameHex string, weStartedMonit
 		fmt.Println("    Note       : most clients ignore broadcast deauth; -c <MAC> targets one client.")
 	}
 
-	txBefore, txBeforeOK := readTxFrames(client)
+	txBefore, txBeforeOK := readInjectFrames(client)
 	sent, queued, failed, err := client.SendInjection(frameHex, deauthCount, deauthInterval)
 	if err != nil {
 		fmt.Printf("[!] Injection failed: %v\n", err)
@@ -226,26 +226,28 @@ func isGroupMAC(mac string) bool {
 	return hw[0]&0x01 != 0
 }
 
-// readTxFrames samples the drone's cumulative TX counter. The boolean is false
-// when telemetry is unavailable, so callers can fall back to a neutral message.
-func readTxFrames(client *drone.ControlClient) (uint64, bool) {
+// readInjectFrames samples the drone's cumulative injected-frame counter. The
+// boolean is false when telemetry is unavailable or the firmware predates the
+// counter, so callers can fall back to a neutral message.
+func readInjectFrames(client *drone.ControlClient) (uint64, bool) {
 	st, err := client.GetStatus()
-	if err != nil {
+	if err != nil || st.InjectFrames == nil {
 		return 0, false
 	}
-	return st.TxFrames, true
+	return *st.InjectFrames, true
 }
 
-// reportTxDelta compares the TX counter before the burst with the counter after
-// the queue drained, so the CLI reports frames that actually left the radio
-// instead of only the synchronous writes.
+// reportTxDelta compares the injected-frame counter before the burst with the
+// counter after the queue drained. The counter tracks frames the driver
+// accepted; driver-level retransmissions happen below it and can put more
+// frames on air than this delta reports.
 func reportTxDelta(client *drone.ControlClient, before uint64, beforeOK bool, expected int) {
-	after, afterOK := readTxFrames(client)
+	after, afterOK := readInjectFrames(client)
 	if !beforeOK || !afterOK || after < before {
 		fmt.Printf("[+] Burst complete — %d frame(s) handed to the radio.\n", expected)
 		return
 	}
-	fmt.Printf("[+] TX frames on air: +%d (expected %d)\n", after-before, expected)
+	fmt.Printf("[+] TX frames accepted by the driver: +%d (queued %d)\n", after-before, expected)
 }
 
 // waitForTxDrain polls drone telemetry until the injection queue is empty (or
