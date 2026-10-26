@@ -546,8 +546,15 @@ int radio_set_down(daemon_t *d)
  */
 int radio_restore_normal(daemon_t *d)
 {
-    int r;
+    int  r;
+    bool has_sta;
+
     MOCK_RETURN(d);
+
+    /* A station vif follows its AP's channel; pinning radio0 to a channel
+     * recorded during a capture session would only fight the association. */
+    has_sta = (iw_run("uci -q get wireless.pwn4c_sta.device "
+                      ">/dev/null 2>&1") == 0);
 
     /* Re-enable UCI profile */
     r = iw_run("uci set wireless.radio0.disabled='0' && uci commit wireless");
@@ -555,10 +562,12 @@ int radio_restore_normal(daemon_t *d)
         util_log("radio", "uci re-enable failed (r=%d), continuing", r);
     }
 
-    /* Set channel to saved value first */
-    r = iw_run("uci set wireless.radio0.channel='%d' && uci commit wireless",
-               d->saved_channel > 0 ? d->saved_channel : 6);
-    (void)r;
+    /* Set channel to saved value first (AP-only setups) */
+    if (!has_sta) {
+        r = iw_run("uci set wireless.radio0.channel='%d' && uci commit wireless",
+                   d->saved_channel > 0 ? d->saved_channel : 6);
+        (void)r;
+    }
 
     /* Bring interface back up in managed/AP mode */
     r = iw_run("wifi up 2>/dev/null");
@@ -572,14 +581,38 @@ int radio_restore_normal(daemon_t *d)
      * tearing the radio down. If a station profile still exists, bring the
      * logical wan back up once netifd has recreated phy0-sta0.
      */
-    if (iw_run("uci -q get wireless.pwn4c_sta.device >/dev/null 2>&1") == 0) {
+    if (has_sta) {
         util_sleep_ms(500);
         (void)iw_run("ifup wan 2>/dev/null; true");
     }
 
     d->radio_mode = RADIO_NORMAL;
     util_log("radio", "interface %s restored to NORMAL (managed/AP)", d->wlan_iface);
+    util_trace("radio", "restored-normal wlan0=%s",
+               if_nametoindex(d->wlan_iface) != 0 ? "present" : "missing");
     return 0;
+}
+
+/*
+ * radio_profile_enabled — true when UCI still wants the wireless interface
+ * administratively up.
+ *
+ * The daemon's own radio_mode is not authoritative: when a station profile is
+ * stored, netifd brings wlan0/phy0-sta0 up during boot, before pwn4cd starts,
+ * so the daemon still believes RADIO_DOWN even though the radio is live.  If
+ * monitor entry saved that stale value, every capture session would "restore"
+ * the radio to administratively down and silently take the drone off the air
+ * until the next reboot.
+ */
+static bool radio_profile_enabled(void)
+{
+    char buf[16] = {0};
+
+    if (util_run_cmd_capture("uci -q get wireless.radio0.disabled",
+                             buf, sizeof(buf), 2) != 0) {
+        return false;   /* no wireless config: nothing to restore */
+    }
+    return strcmp(buf, "1") != 0;
 }
 
 /*
@@ -598,6 +631,11 @@ int radio_enter_monitor(daemon_t *d, int channel)
     /* Save state before entering monitor */
     d->saved_channel    = d->channel > 0 ? d->channel : 6;
     d->saved_radio_mode = d->radio_mode;
+    if (d->saved_radio_mode == RADIO_DOWN && radio_profile_enabled()) {
+        d->saved_radio_mode = RADIO_NORMAL;
+    }
+    util_trace("radio", "enter-monitor ch=%d saved=%d daemon=%d",
+               channel, (int)d->saved_radio_mode, (int)d->radio_mode);
 
     /*
      * Step 1: stop the managed stack.  Order matters for the MT7628:
@@ -616,6 +654,8 @@ int radio_enter_monitor(daemon_t *d, int channel)
                "wifi down 2>/dev/null; true");
     (void)r;
     util_sleep_ms(600);
+    util_trace("radio", "managed-stack-down wlan0=%s",
+               if_nametoindex(d->wlan_iface) != 0 ? "present" : "gone");
 
     /* Step 2: bring link down via POSIX ioctl */
     (void)iface_set_up(d->wlan_iface, false);
@@ -666,6 +706,7 @@ int radio_enter_monitor(daemon_t *d, int channel)
     d->radio_mode = RADIO_MONITOR;
     d->channel    = channel;
     util_log("radio", "monitor mode active on %s ch%d", d->wlan_iface, channel);
+    util_trace("radio", "monitor-active iface=%s ch=%d", d->wlan_iface, channel);
     return 0;
 }
 
@@ -675,6 +716,8 @@ int radio_enter_monitor(daemon_t *d, int channel)
 int radio_exit_monitor(daemon_t *d)
 {
     MOCK_RETURN(d);
+
+    util_trace("radio", "exit-monitor saved=%d", (int)d->saved_radio_mode);
 
     /* Bring link down via POSIX ioctl before switching type */
     (void)iface_set_up(d->wlan_iface, false);
@@ -692,6 +735,7 @@ int radio_exit_monitor(daemon_t *d)
     /* Default: leave DOWN */
     d->radio_mode = RADIO_DOWN;
     util_log("radio", "monitor exited; radio is DOWN");
+    util_trace("radio", "left-down");
     return 0;
 }
 

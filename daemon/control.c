@@ -241,6 +241,9 @@ void ctrl_teardown_monitor(daemon_t *d)
         && d->radio_mode != RADIO_MONITOR) { return; }
 
     d->hop_enabled = false;
+    if (!d->mock_mode) {
+        util_trace("teardown", "start tx_queue=%d", d->tx_q.count);
+    }
     tx_queue_flush_wait(d, TX_FLUSH_MAX_MS);
     util_sleep_ms(TX_SETTLE_MS);
     capture_close(d);
@@ -249,6 +252,11 @@ void ctrl_teardown_monitor(daemon_t *d)
     util_sleep_ms(150);
     if (radio_exit_monitor(d) < 0) {
         util_log("ctrl", "monitor teardown: radio_exit_monitor partial failure");
+        util_trace("teardown", "radio-exit FAILED");
+    } else {
+        util_log("ctrl", "monitor stopped — radio %s",
+                 d->radio_mode == RADIO_NORMAL ? "restored to NORMAL"
+                                               : "left DOWN");
     }
 }
 
@@ -731,6 +739,12 @@ static void cmd_send_injection(daemon_t *d, const char *id, const char *params)
     }
 
     d->state = STATE_MONITORING;
+
+    if (!d->mock_mode) {
+        util_trace("inject",
+                   "frames=%d interval_ms=%d queued=%d sent=%d failed=%d",
+                   count, interval_ms, queued, sent, failed);
+    }
 
     if (queued == 0 && failed > 0) {
         send_error(d, id, "TX_QUEUE_FULL",
@@ -1387,10 +1401,8 @@ void ctrl_close_client(daemon_t *d)
     }
     if (was_monitoring) {
         ctrl_teardown_monitor(d);
-        util_log("ctrl", "client gone — monitor stopped, radio restored");
-    } else {
-        util_log("ctrl", "client gone");
     }
+    util_log("ctrl", "client gone");
     d->state         = STATE_IDLE;
     d->client_authed = false;
     d->host_ip       = 0;

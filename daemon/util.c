@@ -20,6 +20,7 @@
 #include <sys/wait.h>
 #include <sys/utsname.h>
 #include <sys/sysinfo.h>
+#include <sys/stat.h>
 
 /* ── Logging ──────────────────────────────────────────────────────────────── */
 
@@ -31,6 +32,57 @@ void util_log(const char *tag, const char *fmt, ...)
     (void)vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     syslog(LOG_DAEMON | LOG_INFO, "[%s] %s", tag, buf);
+}
+
+/*
+ * util_trace — Append one timestamped breadcrumb to a file that survives a
+ * reset.
+ *
+ * Every interesting radio transition already goes to logread, but logread
+ * lives in tmpfs: when the mt76 firmware wedges the box, the reboot wipes the
+ * only evidence of which step killed it.  /root is on the jffs2 overlay, so a
+ * trace written here is still readable after the drone comes back.
+ *
+ * Only rare state transitions are traced (radio mode changes, injection) and
+ * the file is capped, so flash wear stays negligible.
+ */
+#define UTIL_TRACE_PATH  "/root/pwn4c-trace.log"
+#define UTIL_TRACE_MAX   (64 * 1024)
+
+void util_trace(const char *tag, const char *fmt, ...)
+{
+    struct stat st;
+    struct tm   tm;
+    time_t      now;
+    char        body[256];
+    char        line[320];
+    va_list     ap;
+    FILE       *fp;
+
+    va_start(ap, fmt);
+    (void)vsnprintf(body, sizeof(body), fmt, ap);
+    va_end(ap);
+
+    now = time(NULL);
+    (void)localtime_r(&now, &tm);
+    (void)snprintf(line, sizeof(line),
+                   "%04d-%02d-%02d %02d:%02d:%02d [%s] %s\n",
+                   tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                   tm.tm_hour, tm.tm_min, tm.tm_sec, tag, body);
+
+    fp = fopen(UTIL_TRACE_PATH, "a");
+    if (!fp) { return; }
+
+    if (fstat(fileno(fp), &st) == 0 && st.st_size > UTIL_TRACE_MAX) {
+        (void)fclose(fp);
+        fp = fopen(UTIL_TRACE_PATH, "w");
+        if (!fp) { return; }
+    }
+
+    (void)fputs(line, fp);
+    (void)fflush(fp);
+    (void)fsync(fileno(fp));
+    (void)fclose(fp);
 }
 
 /* ── File helpers ─────────────────────────────────────────────────────────── */

@@ -218,6 +218,7 @@ typedef struct {
 int     util_read_file(const char *path, char *buf, size_t bufsize);
 int     util_read_int_file(const char *path, int *out);
 void    util_log(const char *tag, const char *fmt, ...);
+void    util_trace(const char *tag, const char *fmt, ...);
 int     util_run_cmd(const char *cmd);
 int     util_run_cmd_timeout(const char *cmd, int timeout_secs);
 int     util_run_cmd_timeout_quiet(const char *cmd, int timeout_secs);

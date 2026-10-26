@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/3lyly0/Pwn4C/internal/drone"
@@ -411,7 +412,7 @@ func (s *shellState) doListen(deauth bool) {
 			}
 		}
 
-		receiver := s.startReceiver(outPath)
+		receiver, frames := s.startReceiver(outPath)
 		fmt.Printf("[+] Injecting %d deauth frames against %s...\n", count, bssid)
 		sent, queued, failed, err := s.client.SendInjection(frameHex, count, 10)
 		if err != nil {
@@ -421,7 +422,12 @@ func (s *shellState) doListen(deauth bool) {
 		}
 		fmt.Printf("[+] Transmitted: %d, Queued: %d, Failed: %d\n", sent, queued, failed)
 		if queued > 0 {
-			waitForTxDrain(s.client, 5*time.Second)
+			if err := waitForTxDrain(s.client, 5*time.Second); err != nil {
+				receiver.Close()
+				fmt.Printf("[!] Lost contact with the drone during TX: %v\n", err)
+				fmt.Println("    It may have reset — run `pwn4c discover` and check its uptime.")
+				return
+			}
 		}
 		fmt.Println("[+] Deauth sent — listening for reconnections and handshakes.")
 		fmt.Printf("    Capturing %s -> %s\n", label, outPath)
@@ -432,12 +438,13 @@ func (s *shellState) doListen(deauth bool) {
 		fmt.Println("\n[*] Stopping capture...")
 		receiver.Close()
 		fmt.Printf("[+] Capture saved: %s\n", outPath)
+		reportCapture(frames.Load())
 		fmt.Println("    wireshark -r " + outPath + "   (filter: eapol || wlan.fc.type_subtype == 0x0c)")
 		return
 	}
 
 	// Plain listen
-	receiver := s.startReceiver(outPath)
+	receiver, frames := s.startReceiver(outPath)
 	fmt.Printf("[+] Entering monitor mode on channel %d", channel)
 	if bssid != "" {
 		fmt.Printf(" (BSSID filter %s)", bssid)
@@ -461,21 +468,33 @@ func (s *shellState) doListen(deauth bool) {
 	fmt.Println("\n[*] Stopping capture...")
 	receiver.Close()
 	fmt.Printf("[+] Capture saved: %s\n", outPath)
+	reportCapture(frames.Load())
 }
 
-func (s *shellState) startReceiver(outPath string) *drone.FrameReceiver {
-	var frames uint64
+// reportCapture flags a capture window that produced no frames at all. A live
+// monitor interface on a busy channel always yields beacons, so zero frames
+// means the radio (not a filter) is the problem — usually a wedge or a reset.
+func reportCapture(frames uint64) {
+	if frames > 0 {
+		return
+	}
+	fmt.Println("[!] 0 frames captured — the monitor interface produced nothing.")
+	fmt.Println("    The drone's radio may have wedged or reset; check `pwn4c discover`.")
+}
+
+func (s *shellState) startReceiver(outPath string) (*drone.FrameReceiver, *atomic.Uint64) {
+	var frames atomic.Uint64
 	receiver, err := drone.StartStreamReceiver(drone.DefaultStreamPort, outPath, func(seq uint32, frame []byte) {
-		frames++
-		if frames == 1 || frames%50 == 0 {
-			fmt.Printf("\r[+] Captured %d frames...", frames)
+		n := frames.Add(1)
+		if n == 1 || n%50 == 0 {
+			fmt.Printf("\r[+] Captured %d frames...", n)
 		}
 	})
 	if err != nil {
 		fmt.Printf("[!] Failed to bind UDP stream receiver: %v\n", err)
 		os.Exit(1)
 	}
-	return receiver
+	return receiver, &frames
 }
 
 func (s *shellState) doStop() {

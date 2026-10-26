@@ -56,7 +56,11 @@ func runDeauthWithListen(client *drone.ControlClient, frameHex string) {
 
 	fmt.Printf("[+] Injection accepted. Transmitted: %d, Queued: %d, Failed: %d\n", sent, queued, failed)
 	if queued > 0 {
-		waitForTxDrain(client, 5*time.Second)
+		if err := waitForTxDrain(client, 5*time.Second); err != nil {
+			fmt.Printf("[!] Lost contact with the drone during TX: %v\n", err)
+			fmt.Println("    It may have reset — check `pwn4c discover` and its uptime.")
+			os.Exit(1)
+		}
 	}
 
 	fmt.Printf("\n[+] Deauth sent — listening on channel %d for reconnections and handshakes.\n", deauthChannel)

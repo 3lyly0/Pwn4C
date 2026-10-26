@@ -189,6 +189,61 @@ place and the handshake lands in the PCAP.
 
 ---
 
+## Radio Is Dead After `listen` / `deauth` (No AP, No Uplink)
+
+### Symptom
+
+The capture finishes normally, the shell returns to its menu, but the drone is
+off the air: `wlan0` and `phy0-sta0` are gone, the station uplink is down, and
+`pwn4c discover` only answers over Ethernet. A reboot brings everything back.
+
+```
+[radio] monitor exited; radio is DOWN
+[ctrl] client gone — monitor stopped, radio restored     # <- not true
+```
+
+### Cause
+
+`radio_enter_monitor()` saved `d->radio_mode` as the state to return to. When a
+station profile is stored, netifd brings the radio up during boot, **before**
+`pwn4cd` starts, so the daemon still believes `RADIO_DOWN`. The first monitor
+session therefore saved "down" and dutifully restored the radio to
+administratively down.
+
+### Fix (unreleased)
+
+Monitor entry now derives the saved mode from UCI
+(`wireless.radio0.disabled`), not from the daemon's stale view, and the teardown
+log states the real outcome. `radio_restore_normal()` also leaves
+`radio0.channel` alone when a station profile exists, so the STA can follow its
+AP's channel when it rejoins.
+
+### Verifying a crash that wipes the log
+
+`logread` lives in RAM, so a watchdog reset or kernel panic destroys the
+evidence. The daemon now appends every radio transition to a file on the
+overlay:
+
+```bash
+ssh root@192.168.4.1 "cat /root/pwn4c-trace.log"
+```
+
+After a reset, the last line tells you exactly which step was reached:
+
+```
+2026-10-26 02:10:51 [radio] enter-monitor ch=1 saved=1 daemon=0
+2026-10-26 02:10:52 [radio] managed-stack-down wlan0=gone
+2026-10-26 02:10:52 [radio] monitor-active iface=wlan0 ch=1
+2026-10-26 02:11:02 [inject] frames=10 interval_ms=10 queued=10 sent=0 failed=0
+```
+
+- ends at `inject` → the reset happened during TX injection;
+- ends at `restored-normal` → the reset happened while netifd was re-creating
+  the managed interfaces;
+- ends at `monitor-active` with no `exit` → the phy died while capturing.
+
+---
+
 ## Exploit Failures
 
 ### Symptom

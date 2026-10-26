@@ -3,6 +3,28 @@
 All notable changes to Pwn4C are documented here. For releases prior to
 v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
 
+## [Unreleased]
+
+### Fixed
+- **Radio left administratively down after a capture session:** at boot the
+  daemon starts with `radio_mode = RADIO_DOWN` while netifd has already applied
+  the saved wireless profile, so the first `listen`/`deauth`/`networks` saved
+  the wrong mode and "restored" the radio to down, silently taking the drone
+  off the air until the next reboot. Monitor entry now derives the saved mode
+  from the actual UCI/radio state, and the teardown log reports what really
+  happened instead of always claiming "radio restored".
+- **Station rejoin after monitor:** `radio_restore_normal` no longer pins
+  `radio0.channel` when a station profile exists (the STA follows its AP), so
+  the uplink comes back after a capture session.
+- **Silent capture failures:** `listen`/`deauth` now warn when a capture window
+  produced zero frames, and the CLI reports a lost control connection during
+  the TX drain instead of claiming the burst was sent.
+
+### Added
+- **Persistent radio trace:** `util_trace` appends rare state transitions
+  (monitor enter/exit, injection, teardown) to `/root/pwn4c-trace.log`, which
+  survives a watchdog reset or kernel panic — the RAM-only `logread` does not.
+
 ## [1.3.2] - 2026-10-26
 
 ### Fixed

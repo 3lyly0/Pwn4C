@@ -127,7 +127,11 @@ func runPlainDeauth(client *drone.ControlClient, frameHex string, weStartedMonit
 
 	if queued > 0 {
 		fmt.Println("[*] Waiting for the drone TX queue to drain...")
-		waitForTxDrain(client, 5*time.Second)
+		if err := waitForTxDrain(client, 5*time.Second); err != nil {
+			fmt.Printf("[!] Lost contact with the drone during TX: %v\n", err)
+			fmt.Println("    The drone may have reset — run `pwn4c discover` and check its uptime.")
+			return
+		}
 		fmt.Println("[+] TX queue drained — all frames left the air.")
 	}
 
@@ -140,16 +144,20 @@ func runPlainDeauth(client *drone.ControlClient, frameHex string, weStartedMonit
 
 // waitForTxDrain polls drone telemetry until the injection queue is empty (or
 // the deadline passes). It keeps the session open for exactly as long as the
-// radio still needs it.
-func waitForTxDrain(client *drone.ControlClient, maxWait time.Duration) {
+// radio still needs it. A transport error means the drone went away mid-burst,
+// which the caller must surface instead of reporting a clean send.
+func waitForTxDrain(client *drone.ControlClient, maxWait time.Duration) error {
 	deadline := time.Now().Add(maxWait)
 	for {
 		st, err := client.GetStatus()
-		if err != nil || st.TxQueueDepth == 0 {
-			return
+		if err != nil {
+			return err
+		}
+		if st.TxQueueDepth == 0 {
+			return nil
 		}
 		if time.Now().After(deadline) {
-			return
+			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
