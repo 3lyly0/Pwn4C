@@ -50,7 +50,11 @@ var wifiStatusCmd = &cobra.Command{
 		fmt.Printf(" SSID     : %s\n", st.SSID)
 		fmt.Printf(" BSSID    : %s\n", st.BSSID)
 		fmt.Printf(" Channel  : %d\n", st.Channel)
-		fmt.Printf(" State    : %s\n", st.State)
+		stateLine := st.State
+		if st.WPAState != "" {
+			stateLine = fmt.Sprintf("%s (%s)", st.State, st.WPAState)
+		}
+		fmt.Printf(" State    : %s\n", stateLine)
 		fmt.Printf(" IP (wan) : %s\n", st.IP)
 		fmt.Println("======================================")
 	},
