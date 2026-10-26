@@ -32,7 +32,16 @@ var wifiStatusCmd = &cobra.Command{
 			return
 		}
 
-		if !st.Connected {
+		switch {
+		case st.Error == "auth_failed":
+			fmt.Println("[!] The access point rejected the WPA key (wrong password or security mode).")
+			fmt.Println("    Re-run `pwn4c connect` with the correct key; use --encryption sae for WPA3-only APs.")
+			return
+		case st.State == "associating":
+			fmt.Println("[*] Associated, waiting for the WPA 4-way handshake to complete...")
+		case st.Connected && st.IP == "":
+			fmt.Println("[*] WPA handshake complete, waiting for a DHCP lease...")
+		case !st.Connected && !st.Associated:
 			fmt.Println("[-] Drone is not associated with any network (radio idle).")
 			return
 		}
@@ -41,6 +50,7 @@ var wifiStatusCmd = &cobra.Command{
 		fmt.Printf(" SSID     : %s\n", st.SSID)
 		fmt.Printf(" BSSID    : %s\n", st.BSSID)
 		fmt.Printf(" Channel  : %d\n", st.Channel)
+		fmt.Printf(" State    : %s\n", st.State)
 		fmt.Printf(" IP (wan) : %s\n", st.IP)
 		fmt.Println("======================================")
 	},

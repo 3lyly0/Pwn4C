@@ -220,6 +220,7 @@ int     util_read_int_file(const char *path, int *out);
 void    util_log(const char *tag, const char *fmt, ...);
 int     util_run_cmd(const char *cmd);
 int     util_run_cmd_timeout(const char *cmd, int timeout_secs);
+int     util_run_cmd_timeout_quiet(const char *cmd, int timeout_secs);
 int     util_run_cmd_capture(const char *cmd, char *out, size_t outsz, int timeout_secs);
 int     util_run_detached(const char *cmd);
 void    util_json_escape(const char *in, char *out, size_t outsz);
@@ -241,6 +242,17 @@ void    util_hmac_sha256(const uint8_t *key, size_t key_len,
                          uint8_t out[32]);
 void    util_hmac_sha256_hex(const char *key, const char *msg, char out_hex[65]);
 int     util_random_hex(char *out, size_t hex_chars);
+
+/*
+ * util_wpa_psk_hex — Derive the 64-hex WPA PSK from an 8-63 char passphrase
+ * and the SSID using PBKDF2-HMAC-SHA1 (4096 iterations, IEEE 802.11i).
+ * Returns 0 on success, -1 on invalid input.
+ *
+ * Feeding the derived hex key to wpa_supplicant avoids every passphrase
+ * parsing/quoting corner case in the UCI -> netifd -> supplicant chain.
+ */
+int     util_wpa_psk_hex(const char *passphrase, const char *ssid,
+                         char out_hex[65]);
 
 /* radio.c */
 int     radio_set_down(daemon_t *d);

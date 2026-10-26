@@ -64,7 +64,11 @@ fi
 # Keep the squashfs rootfs well under the 4 MB budget (see docs/hardware.md):
 # add monitor-mode tooling, drop everything the headless drone never uses.
 # NOTE: dnsmasq stays — it is the drone's DHCP server on 192.168.4.0/24.
-PACKAGES="iw tcpdump-mini -ppp -ppp-mod-pppoe -firewall4 -odhcpd-ipv6only -odhcp6c -kmod-ipv6"
+# wpa-cli is required by WIFI_STATUS: it distinguishes a completed 4-way
+# handshake (wpa_state=COMPLETED) from a bare association, and reports the
+# [TEMP-DISABLED] flag that a wrong PSK produces. Without it the daemon can
+# only fall back to `iw link`, which looks "connected" before authentication.
+PACKAGES="iw wpa-cli tcpdump-mini -ppp -ppp-mod-pppoe -firewall4 -odhcpd-ipv6only -odhcp6c -kmod-ipv6"
 
 chmod +x "$FW_DIR/files/etc/init.d/"* 2>/dev/null || true
 chmod +x "$FW_DIR/files/etc/uci-defaults/"* 2>/dev/null || true
@@ -172,7 +176,7 @@ MANIFEST="$IB_BIN_DIR/$(ls "$IB_BIN_DIR/" | grep '\.manifest$' | head -n 1)"
 if [ -f "$MANIFEST" ]; then
     echo ""
     echo "── Package manifest checks ──────────────────────────────────"
-    for req in iw tcpdump-mini dropbear dnsmasq kmod-mac80211; do
+    for req in iw wpa-cli tcpdump-mini dropbear dnsmasq kmod-mac80211; do
         if grep -q "^${req}" "$MANIFEST"; then
             echo "  [PASS] ${req} present"
         else

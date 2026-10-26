@@ -767,9 +767,9 @@ monitor session is torn down first.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `ssid` | string | Yes | Network name (1-32 characters) |
-| `psk` | string | No | WPA passphrase (8-63 chars). Omit or empty = open network |
+| `psk` | string | No | WPA passphrase (8-63 chars) or a 64-hex PSK. Omit or empty = open network |
 | `bssid` | string | No | Pin a specific AP |
-| `encryption` | string | No | Override UCI encryption: `psk2` (default), `psk`, `sae`, `sae-mixed`, `psk2-mixed` |
+| `encryption` | string | No | Override UCI encryption: `psk2` (default), `psk`, `psk-mixed`, `sae`, `sae-mixed` |
 
 **Response:** `{"connecting": true, "ssid": "MyNetwork"}` — association
 completes asynchronously; poll `WIFI_STATUS`.
@@ -788,15 +788,33 @@ Reports the drone's upstream station link.
 ```json
 {
   "connected": true,
+  "associated": true,
   "ssid": "MyNetwork",
   "bssid": "AA:BB:CC:DD:EE:FF",
   "ip": "192.168.1.44",
   "channel": 6,
-  "mode": "sta"
+  "mode": "sta",
+  "state": "connected",
+  "error": "",
+  "wpa_state": "COMPLETED"
 }
 ```
 
-`connected` is `false` when the radio is not associated.
+| Field | Meaning |
+|-------|---------|
+| `connected` | WPA 4-way handshake completed (or, on images without `wpa-cli`, an address was leased) |
+| `associated` | 802.11 association exists; authentication may still be in progress |
+| `state` | `connected`, `dhcp` (key accepted, no lease yet), `associating`, `auth_failed`, `disconnected` |
+| `error` | `auth_failed` when the AP rejected the key and wpa_supplicant temporary-disabled the network |
+| `wpa_state` | Raw `wpa_cli status` state (`COMPLETED`, `4WAY_HANDSHAKE`, ...) when available |
+
+Because `connected` is set from `wpa_state=COMPLETED`, a bare association no
+longer looks like a successful join. Callers that need end-to-end
+connectivity must also wait for a non-empty `ip`.
+
+The daemon derives a 64-hex PSK from the passphrase for `psk`/`psk2`, so
+special characters in the key never traverse the UCI/supplicant config
+parser.
 
 ---
 

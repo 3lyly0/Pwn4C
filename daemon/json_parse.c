@@ -105,38 +105,125 @@ static const char *find_key(const char *json, const char *key)
     return NULL;
 }
 
+static int json_hexval(char c)
+{
+    if (c >= '0' && c <= '9') { return c - '0'; }
+    if (c >= 'a' && c <= 'f') { return c - 'a' + 10; }
+    if (c >= 'A' && c <= 'F') { return c - 'A' + 10; }
+    return -1;
+}
+
 /*
  * json_get_str — Extract a string value for key into out (null-terminated).
- * Returns 0 on success, -1 if not found or not a string.
+ *
+ * Decodes the JSON escapes (\", \\, \/, \b, \f, \n, \r, \t, \uXXXX) instead
+ * of copying them verbatim.  This matters for parameters sent by Go's
+ * encoding/json, which HTML-escapes '<', '>' and '&' as \u003c/\u003e/\u0026:
+ * without decoding, a Wi-Fi passphrase containing either character would be
+ * written to UCI with the literal escape text and the AP would reject the key.
+ *
+ * Returns 0 on success, -1 if not found, malformed, or not a string.
  */
 int json_get_str(const char *json, const char *key, char *out, size_t n)
 {
     const char *p;
-    const char *start;
-    size_t len;
+    size_t wi = 0;
 
     if (!out || n == 0) { return -1; }
     out[0] = '\0';
 
     p = find_key(json, key);
-    if (!p) { return -1; }
+    if (!p || *p != '"') { return -1; }
+    p++;  /* skip opening quote */
 
-    if (*p != '"') { return -1; }  /* not a string value */
-    start = p + 1;
+    while (*p != '\0') {
+        unsigned char c;
 
-    p = start;
-    while (*p && *p != '"') {
-        if (*p == '\\') { p++; }  /* skip escaped char */
-        if (*p) { p++; }
+        if (*p == '"') {
+            out[wi] = '\0';
+            return 0;
+        }
+
+        c = (unsigned char)*p++;
+        if (c != '\\') {
+            if (wi + 1 < n) { out[wi++] = (char)c; }
+            continue;
+        }
+
+        if (*p == '\0') { return -1; }
+        {
+            char esc = *p++;
+
+            switch (esc) {
+            case '"':  c = '"';  break;
+            case '\\': c = '\\'; break;
+            case '/':  c = '/';  break;
+            case 'b':  c = '\b'; break;
+            case 'f':  c = '\f'; break;
+            case 'n':  c = '\n'; break;
+            case 'r':  c = '\r'; break;
+            case 't':  c = '\t'; break;
+            case 'u': {
+                uint32_t cp = 0;
+                int k;
+
+                for (k = 0; k < 4; k++) {
+                    int h = json_hexval(p[k]);
+                    if (h < 0) { return -1; }
+                    cp = (cp << 4) | (uint32_t)h;
+                }
+                p += 4;
+
+                /* Combine UTF-16 surrogate pairs. */
+                if (cp >= 0xD800u && cp <= 0xDBFFu) {
+                    uint32_t lo = 0;
+                    if (p[0] != '\\' || p[1] != 'u') { return -1; }
+                    p += 2;
+                    for (k = 0; k < 4; k++) {
+                        int h = json_hexval(p[k]);
+                        if (h < 0) { return -1; }
+                        lo = (lo << 4) | (uint32_t)h;
+                    }
+                    p += 4;
+                    if (lo < 0xDC00u || lo > 0xDFFFu) { return -1; }
+                    cp = 0x10000u + ((cp - 0xD800u) << 10) + (lo - 0xDC00u);
+                } else if (cp >= 0xDC00u && cp <= 0xDFFFu) {
+                    return -1;
+                }
+
+                /* Emit UTF-8; drop the tail if the caller's buffer is full. */
+                if (cp < 0x80u) {
+                    if (wi + 1 < n) { out[wi++] = (char)cp; }
+                } else if (cp < 0x800u) {
+                    if (wi + 2 < n) {
+                        out[wi++] = (char)(0xC0u | (cp >> 6));
+                        out[wi++] = (char)(0x80u | (cp & 0x3Fu));
+                    }
+                } else if (cp < 0x10000u) {
+                    if (wi + 3 < n) {
+                        out[wi++] = (char)(0xE0u | (cp >> 12));
+                        out[wi++] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+                        out[wi++] = (char)(0x80u | (cp & 0x3Fu));
+                    }
+                } else {
+                    if (wi + 4 < n) {
+                        out[wi++] = (char)(0xF0u | (cp >> 18));
+                        out[wi++] = (char)(0x80u | ((cp >> 12) & 0x3Fu));
+                        out[wi++] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+                        out[wi++] = (char)(0x80u | (cp & 0x3Fu));
+                    }
+                }
+                continue;
+            }
+            default:
+                return -1;
+            }
+        }
+
+        if (wi + 1 < n) { out[wi++] = (char)c; }
     }
-    if (*p != '"') { return -1; }  /* unterminated string */
 
-    len = (size_t)(p - start);
-    if (len >= n) { len = n - 1; }
-
-    memcpy(out, start, len);
-    out[len] = '\0';
-    return 0;
+    return -1;  /* unterminated string */
 }
 
 /*

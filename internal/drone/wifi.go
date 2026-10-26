@@ -25,14 +25,20 @@ type scanResult struct {
 }
 
 // WifiLinkStatus is the WIFI_STATUS payload: the drone's upstream station
-// link (or connected=false when the radio is not associated).
+// link. Connected means the WPA 4-way handshake completed (or, on older
+// daemons, that an address was leased); IP is reported separately so a
+// caller can distinguish "joined, waiting for DHCP" from "not joined".
 type WifiLinkStatus struct {
-	Connected bool   `json:"connected"`
-	SSID      string `json:"ssid"`
-	BSSID     string `json:"bssid"`
-	IP        string `json:"ip"`
-	Channel   int    `json:"channel"`
-	Mode      string `json:"mode"`
+	Connected  bool   `json:"connected"`
+	Associated bool   `json:"associated"`
+	SSID       string `json:"ssid"`
+	BSSID      string `json:"bssid"`
+	IP         string `json:"ip"`
+	Channel    int    `json:"channel"`
+	Mode       string `json:"mode"`
+	State      string `json:"state"`
+	Error      string `json:"error"`
+	WPAState   string `json:"wpa_state"`
 }
 
 // okOrError maps a failed BaseResponse onto a Go error.
@@ -70,7 +76,7 @@ func (c *ControlClient) ScanNetworks(dwellMs int) ([]WirelessNetwork, error) {
 
 // WifiConnect joins the drone to an upstream network. An empty password
 // selects an open network; bssid optionally pins a specific AP; encryption
-// overrides the default psk2 (allowed: psk2, psk, sae, sae-mixed, psk2-mixed).
+// overrides the default psk2 (allowed: psk2, psk, psk-mixed, sae, sae-mixed).
 // Association completes asynchronously — poll WifiStatus afterwards.
 func (c *ControlClient) WifiConnect(ssid, password, bssid, encryption string) error {
 	params := map[string]interface{}{

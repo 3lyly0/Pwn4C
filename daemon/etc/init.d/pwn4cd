@@ -55,11 +55,17 @@ stop_service() {
 }
 
 reload_service() {
-    # No config reload needed; restart on any config change.
+    # Explicit `reload` (operator action) restarts the daemon. Config-change
+    # triggers are deliberately not registered — see the note at the bottom.
     restart
 }
 
-service_triggers() {
-    # Restart if the network interface list changes
-    procd_add_reload_trigger "network"
-}
+# NOTE: intentionally no `procd_add_reload_trigger "network"`.
+#
+# WIFI_CONNECT and WIFI_DISCONNECT edit /etc/config/network (the wan proto and
+# device) by design. A reload trigger on "network" made procd restart pwn4cd
+# in the middle of those commands: the CLI's control socket was reset, the
+# monitor session (if any) was torn down, and re-running the command produced
+# the same restart again. The daemon re-reads interface state on demand and
+# has its own ENETDOWN self-healing, so a network config change must not
+# restart it.

@@ -640,25 +640,78 @@ If monitoring a genuinely empty channel (e.g., channel 13 in a sparse environmen
 
 ## Wi-Fi Station Mode Issues
 
-### `pwn4c connect` times out waiting for association
+### `pwn4c connect` reports `Authentication failed`
 
-1. **Wrong password** — the station profile stays configured; fix it by
-   running `pwn4c connect` again with the correct passphrase (or leave with
-   `pwn4c wifi-disconnect` first).
-2. **Hidden network** — works: pass the SSID normally and the drone scans for
-   it by name. If the AP filters by MAC, you are out of luck until you spoof
-   an accepted address.
-3. **Signal** — run `pwn4c networks` and compare signal levels; join the
-   strongest BSSID explicitly with `--bssid`.
-4. **State check** — `pwn4c wifi-status` shows whether the drone is
-   associated and which IP the upstream network handed it. The daemon logs
-   the exact uci/wifi commands it ran: `ssh root@192.168.4.1 "logread | grep sta"`.
+The access point used the WPA 4-way handshake and rejected the key
+(`MIC_FAILURE` / `WRONG_KEY` in `logread`). The station profile stays
+configured; correct it with:
+
+```bash
+pwn4c connect "Test Network 123" "p@ssw0rd!" --encryption psk2
+pwn4c wifi-status
+```
+
+- **Security mode** — `--encryption psk2` for WPA2-Personal, `sae` for
+  WPA3-only, `sae-mixed` for WPA2/WPA3 transition mode. The default is psk2.
+- **Special characters** — the daemon derives the 64-hex WPA PSK locally
+  (PBKDF2-HMAC-SHA1) for psk/psk2, so `#`, `$`, `"`, `'`, `\` and `<>&` no
+  longer pass through the UCI/supplicant config parser. A 64-hex PSK can also
+  be supplied directly.
+- **Cleared ignore list** — each `connect` restarts the supplicant, so a
+  corrected password is retried immediately instead of waiting out
+  wpa_supplicant's 600-second BSSID blacklist.
+
+### `pwn4c connect` joins but no IP is assigned
+
+The CLI now waits for both the 4-way handshake and a DHCP lease. If it
+reports `Joined the access point, but no DHCP lease was assigned`, the key is
+correct and the upstream DHCP server is the problem:
+
+```bash
+ssh root@192.168.4.1 "ifstatus wan; ip -4 addr show dev phy0-sta0"
+ssh root@192.168.4.1 "logread | grep -i dhcp"
+```
+
+The daemon waits for `phy0-sta0` to exist before running `ifup wan`, then
+retries the logical interface once if no address appears.
+
+### `pwn4c connect` still cannot associate
+
+1. **Hidden network** — supported: pass the SSID normally; the profile sets
+   `scan_ssid=1` implicitly through OpenWrt. If the AP filters by MAC, spoof an
+   accepted address or use the Ethernet path instead.
+2. **Signal / wrong BSSID** — run `pwn4c networks` and compare signal levels;
+   pin the strongest AP explicitly with `--bssid`.
+3. **Passphrase length** — 8-63 characters (or a 64-hex PSK). Shorter keys are
+   rejected by the CLI before anything is sent.
+4. **Daemon log** — the station shell script is quiet by design (it embeds the
+   key), but failures are logged as `WIFI_CONNECT: ...` and `cmd: timeout ...`:
+   `ssh root@192.168.4.1 "logread | grep -E 'sta|pwn4cd'"`.
 
 ### Monitor mode refused after joining a network
 
 The radio is single-band: station mode and monitor mode are mutually
 exclusive. Leave the upstream network first (`pwn4c wifi-disconnect`), then
 start the capture.
+
+### SSH/CLI connection resets right after `pwn4c monitor`
+
+This is expected if the SSH session itself rides the drone's Wi-Fi (either
+the drone's own AP or the upstream station link): monitor mode tears the
+wireless stack down and the radio cannot keep a Wi-Fi link up while capturing.
+It is not a reboot. Use the direct Ethernet cable for the control channel
+(`192.168.4.0/24`), which is unaffected by `wifi down`/`wifi up`.
+
+A *daemon* restart during `pwn4c connect` or `wifi-disconnect` was a separate
+bug: the init script registered a procd reload trigger on `network`, and those
+commands intentionally edit `/etc/config/network`. The trigger has been
+removed. Verify with:
+
+```bash
+ssh root@192.168.4.1 "logread | grep -E 'pwn4cd|procd' | tail -20"
+# uptime must not reset after pwn4c connect / monitor
+pwn4c status
+```
 
 ### `pwn4c upgrade` fails at verification
 

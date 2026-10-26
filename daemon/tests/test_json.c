@@ -83,6 +83,31 @@ static void test_json_get_str(void)
     r = json_get_str("{\"data\":\"has \\\"cmd\\\" in value\",\"cmd\":\"REAL\"}",
                      "cmd", out, sizeof(out));
     CHECK("get_str escaped-quote in value", r == 0 && strcmp(out, "REAL") == 0);
+
+    /* Go's encoding/json HTML-escapes <, > and & as \u003c/\u003e/\u0026.
+     * A Wi-Fi passphrase containing them must be decoded, not stored raw. */
+    r = json_get_str("{\"psk\":\"a\\u003cb\\u003e\\u0026c\"}",
+                     "psk", out, sizeof(out));
+    CHECK("get_str decodes \\u escapes", r == 0 && strcmp(out, "a<b>&c") == 0);
+
+    r = json_get_str("{\"k\":\"line\\nquote\\\"slash\\\\tab\\t\"}",
+                     "k", out, sizeof(out));
+    CHECK("get_str decodes simple escapes", r == 0 &&
+          strcmp(out, "line\nquote\"slash\\tab\t") == 0);
+
+    /* BMP non-ASCII -> UTF-8 (é = U+00E9 = C3 A9) */
+    r = json_get_str("{\"k\":\"caf\\u00e9\"}", "k", out, sizeof(out));
+    CHECK("get_str decodes unicode to UTF-8", r == 0 &&
+          strcmp(out, "caf\xc3\xa9") == 0);
+
+    /* Surrogate pair -> 4-byte UTF-8 (U+1F600) */
+    r = json_get_str("{\"k\":\"\\ud83d\\ude00\"}", "k", out, sizeof(out));
+    CHECK("get_str decodes surrogate pair", r == 0 &&
+          strcmp(out, "\xf0\x9f\x98\x80") == 0);
+
+    /* Invalid escape must be rejected, not silently copied. */
+    r = json_get_str("{\"k\":\"bad\\q\"}", "k", out, sizeof(out));
+    CHECK("get_str rejects invalid escape", r < 0);
 }
 
 static void test_json_get_int(void)

@@ -567,6 +567,16 @@ int radio_restore_normal(daemon_t *d)
         return -1;
     }
 
+    /*
+     * radio_enter_monitor() released the station's wan interface before
+     * tearing the radio down. If a station profile still exists, bring the
+     * logical wan back up once netifd has recreated phy0-sta0.
+     */
+    if (iw_run("uci -q get wireless.pwn4c_sta.device >/dev/null 2>&1") == 0) {
+        util_sleep_ms(500);
+        (void)iw_run("ifup wan 2>/dev/null; true");
+    }
+
     d->radio_mode = RADIO_NORMAL;
     util_log("radio", "interface %s restored to NORMAL (managed/AP)", d->wlan_iface);
     return 0;
@@ -589,10 +599,23 @@ int radio_enter_monitor(daemon_t *d, int channel)
     d->saved_channel    = d->channel > 0 ? d->channel : 6;
     d->saved_radio_mode = d->radio_mode;
 
-    /* Step 1: stop managed stack and kill any lingering supplicant */
-    r = iw_run("killall -9 wpa_supplicant 2>/dev/null; wifi down 2>/dev/null; true");
+    /*
+     * Step 1: stop the managed stack.  Order matters for the MT7628:
+     *   - release the station's DHCP lease first, so netifd does not keep
+     *     retrying on a vif that is about to disappear;
+     *   - ask wpa_supplicant to exit (SIGTERM, not SIGKILL: a killed
+     *     supplicant can leave the driver's vif state half-torn-down);
+     *   - let `wifi down` remove the netifd-owned vif cleanly.
+     * The previous 150 ms settle was too short for netifd to finish on a
+     * busy box, so the del/add fallback below raced with netifd recreating
+     * wlan0 as a managed interface.
+     */
+    r = iw_run("killall udhcpc 2>/dev/null; "
+               "ifdown wan 2>/dev/null; "
+               "killall wpa_supplicant 2>/dev/null; "
+               "wifi down 2>/dev/null; true");
     (void)r;
-    util_sleep_ms(150);
+    util_sleep_ms(600);
 
     /* Step 2: bring link down via POSIX ioctl */
     (void)iface_set_up(d->wlan_iface, false);

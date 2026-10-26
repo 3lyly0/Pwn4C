@@ -145,7 +145,7 @@ int util_run_cmd(const char *cmd)
  * the 2-second iw budget does not apply.
  * Returns the exit status (0 = success, >0 = failure, -1 = fork/timeout error).
  */
-int util_run_cmd_timeout(const char *cmd, int timeout_secs)
+static int run_cmd_timeout(const char *cmd, int timeout_secs, bool log_cmd)
 {
     pid_t pid;
     int   status;
@@ -155,7 +155,9 @@ int util_run_cmd_timeout(const char *cmd, int timeout_secs)
     if (!cmd) { return -1; }
     if (timeout_secs < 1) { timeout_secs = 1; }
 
-    util_log("cmd", "run(%ds): %s", timeout_secs, cmd);
+    if (log_cmd) {
+        util_log("cmd", "run(%ds): %s", timeout_secs, cmd);
+    }
 
     pid = fork();
     if (pid < 0) {
@@ -193,6 +195,21 @@ int util_run_cmd_timeout(const char *cmd, int timeout_secs)
     kill(pid, SIGKILL);
     waitpid(pid, &status, 0);
     return -1;
+}
+
+int util_run_cmd_timeout(const char *cmd, int timeout_secs)
+{
+    return run_cmd_timeout(cmd, timeout_secs, true);
+}
+
+/*
+ * util_run_cmd_timeout_quiet — Same as util_run_cmd_timeout but does not log
+ * the command line. Used when the command embeds a Wi-Fi key: logread is
+ * world-readable on OpenWrt, so secrets must never appear there.
+ */
+int util_run_cmd_timeout_quiet(const char *cmd, int timeout_secs)
+{
+    return run_cmd_timeout(cmd, timeout_secs, false);
 }
 
 /*
@@ -346,7 +363,10 @@ int util_run_detached(const char *cmd)
 
 /*
  * util_json_escape — Copy a string into JSON string content, escaping '"'
- * and '\\' and dropping non-printable bytes. Bounded; always NUL terminates.
+ * and '\\' and dropping non-printable control bytes. Bytes >= 0x80 (UTF-8)
+ * are passed through: JSON strings are Unicode, so an SSID like "Café" must
+ * survive intact instead of being silently truncated to "Caf". Bounded;
+ * always NUL terminates.
  */
 void util_json_escape(const char *in, char *out, size_t outsz)
 {
@@ -363,11 +383,11 @@ void util_json_escape(const char *in, char *out, size_t outsz)
             out[wi++] = '\\';
             out[wi++] = (char)c;
             ri++;
-        } else if (c >= 0x20u && c < 0x7fu) {
+        } else if (c >= 0x20u) {
             out[wi++] = (char)c;
             ri++;
         } else {
-            ri++;   /* drop control / non-ASCII bytes */
+            ri++;   /* drop ASCII control bytes (not valid raw in JSON) */
         }
     }
     out[wi] = '\0';
@@ -690,6 +710,214 @@ void util_hmac_sha256_hex(const char *key, const char *msg, char out_hex[65])
         out_hex[i * 2 + 1] = hex_tbl[mac[i] & 0x0Fu];
     }
     out_hex[64] = '\0';
+}
+
+/* ── Compact C99 SHA-1 / HMAC-SHA1 / PBKDF2 (WPA PSK derivation) ──────────── */
+/* WPA-PSK = PBKDF2(HMAC-SHA1, passphrase, SSID, 4096, 32).  Deriving the
+ * 64-hex key here means wpa_supplicant never has to parse the passphrase,
+ * which sidesteps shell/UCI/supplicant quoting bugs for keys containing
+ * '#', '"', '$', '\\' or other metacharacters. */
+
+typedef struct {
+    uint32_t state[5];
+    uint64_t bitcount;
+    uint8_t  buffer[64];
+} sha1_ctx_t;
+
+#define ROL32(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
+
+static void sha1_transform(sha1_ctx_t *ctx, const uint8_t data[64])
+{
+    uint32_t w[80];
+    uint32_t a, b, c, d, e, f, k, t;
+    int i;
+
+    for (i = 0; i < 16; i++) {
+        w[i] = ((uint32_t)data[i * 4 + 0] << 24)
+             | ((uint32_t)data[i * 4 + 1] << 16)
+             | ((uint32_t)data[i * 4 + 2] << 8)
+             |  (uint32_t)data[i * 4 + 3];
+    }
+    for (; i < 80; i++) {
+        w[i] = ROL32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+    }
+
+    a = ctx->state[0]; b = ctx->state[1]; c = ctx->state[2];
+    d = ctx->state[3]; e = ctx->state[4];
+
+    for (i = 0; i < 80; i++) {
+        if (i < 20) {
+            f = (b & c) | ((~b) & d);
+            k = 0x5A827999u;
+        } else if (i < 40) {
+            f = b ^ c ^ d;
+            k = 0x6ED9EBA1u;
+        } else if (i < 60) {
+            f = (b & c) | (b & d) | (c & d);
+            k = 0x8F1BBCDCu;
+        } else {
+            f = b ^ c ^ d;
+            k = 0xCA62C1D6u;
+        }
+        t = ROL32(a, 5) + f + e + k + w[i];
+        e = d; d = c; c = ROL32(b, 30); b = a; a = t;
+    }
+
+    ctx->state[0] += a; ctx->state[1] += b; ctx->state[2] += c;
+    ctx->state[3] += d; ctx->state[4] += e;
+}
+
+static void sha1_init(sha1_ctx_t *ctx)
+{
+    ctx->state[0] = 0x67452301u;
+    ctx->state[1] = 0xEFCDAB89u;
+    ctx->state[2] = 0x98BADCFEu;
+    ctx->state[3] = 0x10325476u;
+    ctx->state[4] = 0xC3D2E1F0u;
+    ctx->bitcount = 0;
+}
+
+static void sha1_update(sha1_ctx_t *ctx, const uint8_t *data, size_t len)
+{
+    size_t i;
+    size_t idx = (size_t)((ctx->bitcount >> 3) & 0x3Fu);
+
+    ctx->bitcount += (uint64_t)len << 3;
+    for (i = 0; i < len; i++) {
+        ctx->buffer[idx++] = data[i];
+        if (idx == 64u) {
+            sha1_transform(ctx, ctx->buffer);
+            idx = 0;
+        }
+    }
+}
+
+static void sha1_final(sha1_ctx_t *ctx, uint8_t hash[20])
+{
+    size_t idx = (size_t)((ctx->bitcount >> 3) & 0x3Fu);
+    int i;
+
+    ctx->buffer[idx++] = 0x80u;
+    if (idx > 56u) {
+        while (idx < 64u) { ctx->buffer[idx++] = 0; }
+        sha1_transform(ctx, ctx->buffer);
+        idx = 0;
+    }
+    while (idx < 56u) { ctx->buffer[idx++] = 0; }
+
+    for (i = 0; i < 8; i++) {
+        ctx->buffer[56 + i] = (uint8_t)(ctx->bitcount >> ((7 - i) * 8));
+    }
+    sha1_transform(ctx, ctx->buffer);
+
+    for (i = 0; i < 5; i++) {
+        hash[i * 4 + 0] = (uint8_t)(ctx->state[i] >> 24);
+        hash[i * 4 + 1] = (uint8_t)(ctx->state[i] >> 16);
+        hash[i * 4 + 2] = (uint8_t)(ctx->state[i] >> 8);
+        hash[i * 4 + 3] = (uint8_t)(ctx->state[i]);
+    }
+}
+
+static void sha1_hash(const uint8_t *data, size_t len, uint8_t out[20])
+{
+    sha1_ctx_t ctx;
+    sha1_init(&ctx);
+    if (data && len > 0) {
+        sha1_update(&ctx, data, len);
+    }
+    sha1_final(&ctx, out);
+}
+
+static void hmac_sha1(const uint8_t *key, size_t key_len,
+                      const uint8_t *data, size_t data_len,
+                      uint8_t out[20])
+{
+    uint8_t k_ipad[64];
+    uint8_t k_opad[64];
+    uint8_t tk[20];
+    uint8_t inner[20];
+    sha1_ctx_t ctx;
+    size_t i;
+
+    if (key_len > 64u) {
+        sha1_hash(key, key_len, tk);
+        key = tk;
+        key_len = 20u;
+    }
+
+    memset(k_ipad, 0x36, sizeof(k_ipad));
+    memset(k_opad, 0x5c, sizeof(k_opad));
+    for (i = 0; i < key_len; i++) {
+        k_ipad[i] ^= key[i];
+        k_opad[i] ^= key[i];
+    }
+
+    sha1_init(&ctx);
+    sha1_update(&ctx, k_ipad, 64u);
+    if (data && data_len > 0) {
+        sha1_update(&ctx, data, data_len);
+    }
+    sha1_final(&ctx, inner);
+
+    sha1_init(&ctx);
+    sha1_update(&ctx, k_opad, 64u);
+    sha1_update(&ctx, inner, 20u);
+    sha1_final(&ctx, out);
+}
+
+int util_wpa_psk_hex(const char *passphrase, const char *ssid,
+                     char out_hex[65])
+{
+    static const char hex_tbl[] = "0123456789abcdef";
+    uint8_t  psk[32];
+    uint8_t  saltblock[32 + 4];
+    uint8_t  u[20];
+    uint8_t  t[20];
+    uint8_t  u2[20];
+    size_t   plen;
+    size_t   slen;
+    size_t   offset = 0;
+    uint32_t blk = 1;
+    size_t   i;
+    int      j;
+
+    if (!passphrase || !ssid || !out_hex) { return -1; }
+    plen = strlen(passphrase);
+    slen = strlen(ssid);
+    if (plen < 8u || plen > 63u || slen > 32u) { return -1; }
+
+    memcpy(saltblock, ssid, slen);
+
+    while (offset < sizeof(psk)) {
+        saltblock[slen + 0] = (uint8_t)(blk >> 24);
+        saltblock[slen + 1] = (uint8_t)(blk >> 16);
+        saltblock[slen + 2] = (uint8_t)(blk >> 8);
+        saltblock[slen + 3] = (uint8_t)(blk);
+
+        hmac_sha1((const uint8_t *)passphrase, plen,
+                  saltblock, slen + 4u, u);
+        memcpy(t, u, sizeof(t));
+
+        for (i = 1; i < 4096u; i++) {
+            hmac_sha1((const uint8_t *)passphrase, plen, u, sizeof(u), u2);
+            memcpy(u, u2, sizeof(u));
+            for (j = 0; j < 20; j++) {
+                t[j] ^= u[j];
+            }
+        }
+
+        for (j = 0; j < 20 && offset < sizeof(psk); j++) {
+            psk[offset++] = t[j];
+        }
+        blk++;
+    }
+
+    for (i = 0; i < sizeof(psk); i++) {
+        out_hex[i * 2 + 0] = hex_tbl[(psk[i] >> 4) & 0x0Fu];
+        out_hex[i * 2 + 1] = hex_tbl[psk[i] & 0x0Fu];
+    }
+    out_hex[64] = '\0';
+    return 0;
 }
 
 int util_random_hex(char *out, size_t hex_chars)

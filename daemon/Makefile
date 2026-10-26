@@ -81,7 +81,8 @@ cross: $(SRCS) pwn4cd.h
 
 # ── Unit tests ────────────────────────────────────────────────────────────── #
 TEST_SRCS := tests/test_json.c tests/test_stream_hdr.c \
-             tests/test_hex_decode.c tests/test_bpf.c tests/test_beacon.c
+             tests/test_hex_decode.c tests/test_bpf.c tests/test_beacon.c \
+             tests/test_wpa_psk.c
 TEST_BIN  := tests/run_tests
 
 test: $(TEST_BIN)
