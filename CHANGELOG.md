@@ -3,7 +3,7 @@
 All notable changes to Pwn4C are documented here. For releases prior to
 v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
 
-## [Unreleased]
+## [1.4.0] - 2026-10-26
 
 ### Added
 - **LAN sharing on `pwn4c connect`:** joining an upstream network now also
