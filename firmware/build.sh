@@ -130,6 +130,10 @@ if [ ! -d "$IB_DIR" ]; then
     tar -xf "$IB_TARBALL"
 fi
 
+# toplevel.mk exports TMPDIR=$(TOPDIR)/tmp; a cold extract on some 23.05
+# tarballs has no tmp/, and GNU make then warns on every sub-make.
+mkdir -p "$IB_DIR/tmp"
+
 echo "[*] Building image for PROFILE=${PROFILE}..."
 cd "$IB_DIR"
 IB_BIN_DIR="$WORK_DIR/imagebuilder-bin"

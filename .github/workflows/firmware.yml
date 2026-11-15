@@ -49,7 +49,10 @@ jobs:
   build-image:
     name: Build OpenWrt Image
     needs: lint-firmware
-    runs-on: ubuntu-latest
+    # OpenWrt 23.05's ImageBuilder prereq check is `install --version | grep GNU`.
+    # Ubuntu 26.04 (current ubuntu-latest) ships uutils coreutils, whose output
+    # has no "GNU", so the check fails and the build stops. Pin to 24.04.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
