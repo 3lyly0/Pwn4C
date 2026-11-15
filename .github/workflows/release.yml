@@ -78,7 +78,7 @@ jobs:
 
           | Component | File | Description |
           |---|---|---|
-          | **Operator CLI** | `pwn4c-linux-amd64`, `pwn4c-windows-amd64.exe`, `pwn4c-darwin-amd64` | Host orchestrator & control tool |
+          | **Operator CLI** | `pwn4c-linux-amd64`, `pwn4c-linux-arm64`, `pwn4c-darwin-amd64`, `pwn4c-darwin-arm64`, `pwn4c-windows-amd64.exe` | Host orchestrator & control tool |
           | **Implant Daemon** | `pwn4cd-mips` | Standalone MIPS static binary (for OTA/SSH drone updates) |
           | **Drone Firmware** | `pwn4c-firmware-mi4c-sysupgrade.bin` | Full OpenWrt sysupgrade image with daemon pre-baked |
           EOF

@@ -12,6 +12,12 @@ v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
   `connect --no-share` therefore did nothing on v1.4.0. A `json_get_bool()`
   helper now accepts `true`/`false` and the legacy `1`/`0` spellings, and the
   mock transcript exercises the boolean form end to end.
+- **Release downloads were the wrong platform:** `cli.yml` never set
+  `GOOS`/`GOARCH`, so `macos-latest` built a darwin/arm64 binary under the
+  plain name `pwn4c` and the Linux build was overwritten when the artifacts
+  were merged — the published `pwn4c` was not a Linux executable. Each target
+  is now cross-compiled explicitly, named `pwn4c-<os>-<arch>`, and checked
+  with `go version -m` so a mismatched binary fails the build.
 - **Hardcoded interface names:** `pwn4cd` assumed `wlan0` / `phy0-sta0`, which
   do not exist on OpenWrt 23.05 (`phy0-ap0` / `phy0-sta0`). The AP and station
   netdevs are now detected at runtime (`iw dev`, `ifstatus`, UCI) and reported

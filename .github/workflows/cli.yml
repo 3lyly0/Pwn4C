@@ -61,9 +61,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,  goos: linux,   goarch: amd64, bin: pwn4c }
-          - { os: windows-latest, goos: windows, goarch: amd64, bin: pwn4c.exe }
-          - { os: macos-latest,   goos: darwin,  goarch: amd64, bin: pwn4c }
+          # GOOS/GOARCH are set explicitly below: relying on the runner's host
+          # defaults produced a darwin/arm64 binary on macos-latest and left the
+          # linux build missing from the release. `out` is unique per entry so
+          # merge-multiple in release.yml cannot overwrite one build with another.
+          - { os: ubuntu-latest,  goos: linux,   goarch: amd64, out: pwn4c-linux-amd64 }
+          - { os: ubuntu-latest,  goos: linux,   goarch: arm64, out: pwn4c-linux-arm64 }
+          - { os: windows-latest, goos: windows, goarch: amd64, out: pwn4c-windows-amd64.exe }
+          - { os: macos-latest,   goos: darwin,  goarch: amd64, out: pwn4c-darwin-amd64 }
+          - { os: macos-latest,   goos: darwin,  goarch: arm64, out: pwn4c-darwin-arm64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -75,6 +81,10 @@ jobs:
           cache: true
 
       - name: Build Binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
         run: |
           mkdir -p dist
           # Tags give a clean version; branch builds get a dev marker so a
@@ -84,12 +94,20 @@ jobs:
             v*) ;;
             *) VERSION="dev-$(git rev-parse --short HEAD)" ;;
           esac
-          go build -ldflags="-s -w -X github.com/3lyly0/Pwn4C/cmd/pwn4c/cmd.Version=$VERSION" -o "dist/${{ matrix.bin }}" ./cmd/pwn4c
-          "dist/${{ matrix.bin }}" --version || true
+          go build -trimpath -ldflags="-s -w -X github.com/3lyly0/Pwn4C/cmd/pwn4c/cmd.Version=$VERSION" -o "dist/${{ matrix.out }}" ./cmd/pwn4c
+
+      # Cross-compiled binaries cannot be executed on the runner, so verify the
+      # target recorded in the binary instead of trusting the matrix entry.
+      - name: Verify binary target
+        shell: bash
+        run: |
+          go version -m "dist/${{ matrix.out }}"
+          go version -m "dist/${{ matrix.out }}" | grep -q "GOOS=${{ matrix.goos }}"
+          go version -m "dist/${{ matrix.out }}" | grep -q "GOARCH=${{ matrix.goarch }}"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: pwn4c-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/${{ matrix.bin }}
+          path: dist/${{ matrix.out }}
           retention-days: 14
