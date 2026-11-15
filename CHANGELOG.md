@@ -3,7 +3,7 @@
 All notable changes to Pwn4C are documented here. For releases prior to
 v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
 
-## [Unreleased]
+## [1.6.0] - 2026-11-15
 
 ### Added
 - **Handshake harvesting (`pwn4c harvest`)**: the drone now decodes EAPOL-Key
