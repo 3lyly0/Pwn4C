@@ -26,6 +26,7 @@ Pwn4C converts a stock Xiaomi Mi Router 4C (MediaTek MT7628N, ~$15 USD) into a h
 - **Channel Switch Announcements (`pwn4c csa`)**: Spoofs the AP's own beacon (or an 802.11 Spectrum Management action frame) with a CSA element so associated clients move to a channel you choose. Each frame carries an incrementing sequence number and a real countdown, so clients do not drop the copies as duplicates. This is the herd step that makes an evil twin possible, and a quick way to prove a network is (or is not) CSA-hardened. `--follow` leaves the radio watching the new channel.
 - **Station Inventory (`pwn4c clients`)**: The daemon decodes every captured frame into a station observation — probe requests (the station's PNL entry), auth/association requests, ToDS/FromDS data, and deauth/disassoc — and keeps a bounded 32-slot table with the BSSID, last RSSI, probed SSID, frame count and age. The host prints it as a table or `--json`, filters by BSSID/association/RSSI, and can `--watch` it. The table survives `STOP_MONITOR`, so stopping the radio does not lose what was seen. This is the targeting step before a kick, a CSA herd, or an evil twin.
 - **Frame Floods (`pwn4c beacon-flood`, `pwn4c auth-flood`)**: `beacon-flood` injects a stream of beacons with fresh locally administered BSSIDs and plausible SSIDs (built-in router-name list, a wordlist, a fixed name, or hidden) to bury the real networks in a client's scan list. `auth-flood` hammers one BSSID with Open System authentication requests from random source MACs, exhausting the AP's client state table — the classic authentication flood, and a deliberate denial-of-service test. Both are pure host-side frame builders (`internal/drone/flood.go`) over the existing `SEND_INJECTION` path, with `--count`/`--duration`/`--interval` pacing and a live frames-per-second line.
+- **Evil Twin (`pwn4c eviltwin`)**: The daemon brings up a rogue AP on a dedicated `__ap` virtual interface (`pwn4c-ap`) on the same radio as the monitor — hostapd from a generated `/tmp` config, plus a second dnsmasq serving `192.168.66.0/24` on that interface only, so the capture keeps running on the shared channel. The twin copies the real network's SSID, BSSID and channel; `--kick` sends a broadcast deauth from the real BSSID so associated clients drop, rescan and join the twin. A WPA2-PSK twin (8-63 char passphrase, written into the config only as a derived 64-hex PSK) yields crackable 4-way handshakes that the command writes as hashcat mode-22000 lines — the same output `harvest` produces. An open twin (`--passphrase` omitted) serves captive-portal style testing only.
 - **Hardware-Level RF Control & Self-Healing (`pwn4c config`, `pwn4c status`)**: Direct `nl80211` and POSIX `ioctl` control over transmission power (1–20 dBm) and dynamic MAC spoofing/randomization; changes are read back from the driver and persisted to UCI, so the CLI reports what the hardware actually applied. Automatic interface recovery on `ENETDOWN`/`ENODEV`, runtime netdev detection (`phy0-ap0` on OpenWrt 23.05, `wlan0` on older images), and full drop telemetry (`rx_frames`, `inject_frames`, `ring_overruns`, `kernel_drops`, `iface_recoveries`).
 - **Wi-Fi Survey & Station Mode (`pwn4c networks`, `pwn4c connect`)**: The drone sweeps the 2.4 GHz band from monitor mode and reports every AP — hidden networks included, with their advertised SSID length — then can join an upstream network as a station (hidden SSIDs supported) without ever touching the stock AP profile. By default it also NATs `192.168.4.0/24` behind that link, so a host plugged into a LAN port gets internet through the drone's Wi-Fi.
 - **Verified OTA Firmware Updates (`pwn4c upgrade`)**: Push a sysupgrade image from the host over the control channel; the drone verifies size and SHA-256 before flashing and comes back online on the new firmware.
@@ -48,6 +49,7 @@ Pwn4C converts a stock Xiaomi Mi Router 4C (MediaTek MT7628N, ~$15 USD) into a h
 | `clients` | `pwn4c clients [target_ip] -c 6 -s 20 [--bssid <mac>] [--assoc-only] [--min-rssi -70] [--json] [--watch]` | Inventories the stations around the drone: associated clients, their BSSID/RSSI, and the SSIDs they probe for (PNL) |
 | `beacon-flood` | `pwn4c beacon-flood [target_ip] -c 6 -n 2000 [--ssid <name> \| --ssid-file names.txt] [--hidden] [--duration 60]` | Floods the air with fake beacons (random BSSID and SSID) to fill client scan lists |
 | `auth-flood` | `pwn4c auth-flood [target_ip] -b <bssid> -c 6 -n 500 [--src <mac>] [--duration 30]` | Floods an AP with Open System authentication requests from random clients (denial-of-service test) |
+| `eviltwin` | `pwn4c eviltwin [target_ip] -b <bssid> -s <ssid> -c 6 [--passphrase <psk>] [--hidden] [--kick] [--duration 300] -o eviltwin.hc22000` | Runs a rogue AP that copies a real network and writes hashcat 22000 output for the clients it catches |
 | `config` | `pwn4c config [target_ip] --power 20 --mac` | Adjusts TX power, randomizes/spoofs MAC, or restores normal mode |
 | `networks` | `pwn4c networks [-d 4000] [--wps] [--json]` | Surveys nearby APs from the monitor radio (hidden SSIDs shown with their length, WPS flags reported) |
 | `connect` | `pwn4c connect <ssid> [-p pass] [--mac <addr>] [--random-mac] [--retry 2] [--no-share]` | Joins the drone to an upstream Wi-Fi network and NATs its LAN behind the link (station mode, hidden SSIDs OK) |
@@ -130,6 +132,13 @@ hashcat -m 22000 -a 0 hs.hc22000 wordlist.txt
 
 # Maximize TX power and randomize drone MAC (bare --mac = random)
 pwn4c config --power 20 --mac
+
+# Twin a network you own: the drone runs hostapd on a dedicated virtual AP
+# (192.168.66.0/24) while the monitor keeps capturing on the same channel.
+# --kick drops its clients so they rescan and find the twin; every WPA2
+# handshake the twin catches is written as a hashcat 22000 line.
+pwn4c eviltwin -b AA:BB:CC:DD:EE:FF -s "Home WiFi" -c 6 --passphrase '12345678' --kick --duration 300 -o eviltwin.hc22000
+hashcat -m 22000 -a 0 eviltwin.hc22000 wordlist.txt
 ```
 
 ### 6. Wi-Fi Management (survey, join, update)
@@ -156,6 +165,7 @@ pwn4c shell
 #   3) use 1      -> pick a target network
 #   8) deauth     -> burst + capture (asks for the client MAC)
 #   9) harvest    -> capture a crackable handshake/PMKID, write hashcat 22000
+#  12) eviltwin   -> twin the selected network, harvest the clients it catches
 #   q) quit
 ```
 

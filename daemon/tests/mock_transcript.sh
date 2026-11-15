@@ -210,6 +210,63 @@ assert probe_sta["probed"] is True, probe_sta
 assert probe_sta["ssid"] == "other-net", probe_sta
 print("    [assert GET_CLIENTS: 1 associated + 1 PNL-only station: PASS]")
 
+# 7c. Evil twin: the daemon starts a hostapd AP on a dedicated __ap vif and
+# reports it through GET_ROGUE_AP. In mock mode nothing touches a radio, but
+# the state machine, validation and teardown are the real ones.
+twin = send_cmd({"id": "cmd-twin", "command": "START_ROGUE_AP", "params": {
+    "ssid": "mock-lab", "bssid": "02:00:00:de:ad:01", "channel": 6,
+    "passphrase": "supersecret"}})
+assert twin["status"] == "ok", twin
+twin = twin["data"]
+assert twin["active"] is True, twin
+assert twin["ssid"] == "mock-lab", twin
+assert twin["bssid"] == "02:00:00:DE:AD:01", twin
+assert twin["channel"] == 6, twin
+assert twin["security"] == "wpa2-psk", twin
+assert twin["hidden"] is False, twin
+assert twin["interface"] == "pwn4c-ap", twin
+assert twin["ip"] == "192.168.66.1", twin
+assert twin["clients"] == 2, twin
+assert twin["hostapd"] is True and twin["dnsmasq"] is True, twin
+assert twin["monitor_active"] is True, twin
+print("    [assert START_ROGUE_AP: wpa2 twin on the monitor channel: PASS]")
+
+twin_get = send_cmd({"id": "cmd-twin-get", "command": "GET_ROGUE_AP", "params": {}})
+assert twin_get["status"] == "ok" and twin_get["data"]["active"] is True, twin_get
+print("    [assert GET_ROGUE_AP reports the running twin: PASS]")
+
+twin_dup = send_cmd({"id": "cmd-twin-dup", "command": "START_ROGUE_AP", "params": {
+    "ssid": "other", "bssid": "02:00:00:de:ad:02", "channel": 6}})
+assert twin_dup["status"] == "error" and twin_dup["error"]["code"] == "ALREADY_RUNNING", twin_dup
+print("    [assert second START_ROGUE_AP is refused: PASS]")
+
+# The twin pins the shared phy to its channel.
+chan_move = send_cmd({"id": "cmd-twin-chan", "command": "SET_CHANNEL", "params": {"channel": 11}})
+assert chan_move["status"] == "error" and chan_move["error"]["code"] == "ROGUE_AP_ACTIVE", chan_move
+print("    [assert SET_CHANNEL is refused while the twin runs: PASS]")
+
+twin_stop = send_cmd({"id": "cmd-twin-stop", "command": "STOP_ROGUE_AP", "params": {}})
+assert twin_stop["status"] == "ok" and twin_stop["data"]["active"] is False, twin_stop
+twin_gone = send_cmd({"id": "cmd-twin-gone", "command": "GET_ROGUE_AP", "params": {}})
+assert twin_gone["status"] == "ok" and twin_gone["data"]["active"] is False, twin_gone
+twin_stop2 = send_cmd({"id": "cmd-twin-stop2", "command": "STOP_ROGUE_AP", "params": {}})
+assert twin_stop2["status"] == "ok" and twin_stop2["data"]["active"] is False, twin_stop2
+print("    [assert STOP_ROGUE_AP stops and is idempotent: PASS]")
+
+twin_bad = send_cmd({"id": "cmd-twin-bad", "command": "START_ROGUE_AP", "params": {
+    "ssid": "mock-lab", "bssid": "02:00:00:de:ad:01", "channel": 6,
+    "passphrase": "short"}})
+assert twin_bad["status"] == "error" and twin_bad["error"]["code"] == "INVALID_PARAMS", twin_bad
+print("    [assert short WPA passphrase is rejected: PASS]")
+
+# Restart it so STOP_MONITOR can prove the teardown ordering: the twin must be
+# gone before the radio is restored.
+twin2 = send_cmd({"id": "cmd-twin2", "command": "START_ROGUE_AP", "params": {
+    "ssid": "mock-lab", "bssid": "02:00:00:de:ad:01", "channel": 6,
+    "passphrase": "supersecret"}})
+assert twin2["status"] == "ok" and twin2["data"]["active"] is True, twin2
+print("    [assert twin restart: PASS]")
+
 hop_stop = send_cmd({"id": "cmd-7", "command": "HOP_STOP", "params": {}})
 assert hop_stop["status"] == "ok" and hop_stop["data"]["hop_active"] is False
 print("    [assert HOP_STOP: PASS]")
@@ -217,6 +274,11 @@ print("    [assert HOP_STOP: PASS]")
 stop_mon = send_cmd({"id": "cmd-8", "command": "STOP_MONITOR", "params": {}})
 assert stop_mon["status"] == "ok" and stop_mon["data"]["monitor_active"] is False
 print("    [assert STOP_MONITOR: PASS]")
+
+# STOP_MONITOR restores the radio, so it must also tear the twin down first.
+twin_after = send_cmd({"id": "cmd-twin-after", "command": "GET_ROGUE_AP", "params": {}})
+assert twin_after["status"] == "ok" and twin_after["data"]["active"] is False, twin_after
+print("    [assert STOP_MONITOR tears down the twin: PASS]")
 
 # The inventory must outlive the radio, so a client can stop the capture and
 # still read who was there.

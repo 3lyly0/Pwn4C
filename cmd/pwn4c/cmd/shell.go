@@ -113,10 +113,11 @@ const shellMenu = `
   9) harvest      capture a crackable handshake/PMKID, write a hashcat file
  10) clients      inventory stations (associated clients + PNL probes)
  11) flood        beacon or authentication flood (asks which)
- 12) stop         stop monitor mode / hopping
- 13) hop          hop across channels (default 1,6,11)
- 14) power        set TX power (1-20 dBm)
- 15) reboot       reboot the drone
+ 12) eviltwin     twin the selected network, harvest the clients it catches
+ 13) stop         stop monitor mode / hopping
+ 14) hop          hop across channels (default 1,6,11)
+ 15) power        set TX power (1-20 dBm)
+ 16) reboot       reboot the drone
   q) quit
 
 `
@@ -186,13 +187,15 @@ func (s *shellState) dispatch(line string) bool {
 		s.doClients()
 	case "11", "flood":
 		s.doFlood()
-	case "12", "stop":
+	case "12", "eviltwin":
+		s.doEvilTwin()
+	case "13", "stop":
 		s.doStop()
-	case "13", "hop":
+	case "14", "hop":
 		s.doHop(arg)
-	case "14", "power":
+	case "15", "power":
 		s.doPower(arg)
-	case "15", "reboot":
+	case "16", "reboot":
 		s.doReboot()
 	case "menu", "help", "h", "?":
 		// the menu prints every round already
@@ -907,6 +910,126 @@ func (s *shellState) doFlood() {
 	fmt.Println()
 	fmt.Printf("[+] Injection: %d %s frame(s) on air, %d dropped\n", sent, label, failed)
 	if err != nil {
+		fmt.Printf("[!] %v\n", err)
+	}
+}
+
+// doEvilTwin twins the selected network (or a real AP the operator identifies)
+// and captures what its clients send it. It reuses the CLI's session runner so
+// the shell and `pwn4c eviltwin` behave identically: same monitor ownership
+// rules, same handshake polling, same hashcat output.
+func (s *shellState) doEvilTwin() {
+	channel := 6
+	bssid := ""
+	ssid := ""
+
+	if s.selected != nil {
+		channel = s.selected.channel
+		bssid = s.selected.bssid
+		ssid = s.selected.ssid
+		fmt.Printf("[*] Twinning %s (BSSID %s, ch%d).\n",
+			ssid, s.selected.bssid, s.selected.channel)
+	} else {
+		fmt.Println("[*] No network selected — the twin needs the real AP's identity.")
+		fmt.Print("[*] Real AP BSSID: ")
+		v, err := s.readLine()
+		if err != nil {
+			return
+		}
+		bssid = strings.TrimSpace(v)
+		fmt.Print("[*] SSID the twin advertises: ")
+		v, err = s.readLine()
+		if err != nil {
+			return
+		}
+		ssid = strings.TrimSpace(v)
+		fmt.Print("[*] Channel of the real AP (empty = 6): ")
+		v, err = s.readLine()
+		if err != nil {
+			return
+		}
+		if v = strings.TrimSpace(v); v != "" {
+			if ch, err := strconv.Atoi(v); err == nil && ch >= 1 && ch <= 13 {
+				channel = ch
+			} else {
+				fmt.Println("[!] Invalid channel — staying on 6.")
+			}
+		}
+	}
+
+	// The same validation the CLI runs before it opens a connection: fail
+	// here, with the reason, instead of half-way through the session.
+	if err := drone.ValidateRogueAPParams(drone.RogueAPParams{
+		SSID:       ssid,
+		BSSID:      bssid,
+		Channel:    channel,
+		Passphrase: "",
+	}); err != nil {
+		fmt.Printf("[!] %v\n", err)
+		return
+	}
+
+	fmt.Printf("[!] The twin impersonates %s. Only use it on networks you own\n", bssid)
+	fmt.Println("    or are explicitly authorized to test.")
+
+	fmt.Print("[*] WPA2 passphrase for the twin (hidden input; empty = open twin): ")
+	passphrase, err := s.readPassword()
+	if err != nil {
+		fmt.Printf("[!] %v\n", err)
+		return
+	}
+	// Never trim: a passphrase may legitimately contain spaces.
+
+	hidden := s.askYN("[*] Hide the twin's SSID?", false)
+
+	kick := s.askYN("[*] Deauth clients off the real AP so they rescan?", false)
+
+	duration := 0
+	fmt.Print("[*] Stop after N seconds (empty = until Ctrl+C): ")
+	v, err := s.readLine()
+	if err != nil {
+		return
+	}
+	if v = strings.TrimSpace(v); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 86_400 {
+			duration = n
+		} else {
+			fmt.Println("[!] Invalid duration — running until Ctrl+C.")
+		}
+	}
+
+	fmt.Print("[*] Output file (empty = eviltwin.hc22000): ")
+	v, err = s.readLine()
+	if err != nil {
+		return
+	}
+	outPath := strings.TrimSpace(v)
+	if outPath == "" {
+		outPath = "eviltwin.hc22000"
+	}
+
+	units, sessionErr := runEvilTwinSession(s.client, evilTwinOptions{
+		ssid:       ssid,
+		bssid:      bssid,
+		channel:    channel,
+		passphrase: passphrase,
+		hidden:     hidden,
+		kick:       kick,
+		kickCount:  8,
+		duration:   time.Duration(duration) * time.Second,
+	})
+	// runEvilTwinSession stops the twin and any monitor it started; a session
+	// the operator already had running stays up.
+
+	if len(units) == 0 {
+		fmt.Println("[!] No handshake captured.")
+		printEvilTwinHints(passphrase != "")
+		if sessionErr != nil {
+			fmt.Printf("[!] %v\n", sessionErr)
+		}
+		return
+	}
+	if err := writeHarvest(units, outPath); err != nil {
 		fmt.Printf("[!] %v\n", err)
 	}
 }

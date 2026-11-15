@@ -76,6 +76,21 @@
 /* iw timeout: 2-second hard limit per architecture.md */
 #define IW_TIMEOUT_SECS     2
 
+/* ── Rogue AP (evil twin) ─────────────────────────────────────────────────── */
+/* A dedicated `__ap` vif on the same phy, driven by hostapd with a generated
+ * /tmp config. The twin lives on its own subnet so it never touches the
+ * drone's 192.168.4.0/24 LAN. */
+#define ROGUE_IFACE         "pwn4c-ap"
+#define ROGUE_SSID_MAX      32
+#define ROGUE_IP            "192.168.66.1"
+#define ROGUE_NET_PREFIX    "192.168.66"
+#define ROGUE_NETMASK       "24"
+#define ROGUE_HOSTAPD_CONF  "/tmp/pwn4c-hostapd.conf"
+#define ROGUE_HOSTAPD_PID   "/tmp/pwn4c-hostapd.pid"
+#define ROGUE_HOSTAPD_LOG   "/tmp/pwn4c-hostapd.log"
+#define ROGUE_DNSMASQ_CONF  "/tmp/pwn4c-dnsmasq.conf"
+#define ROGUE_DNSMASQ_PID   "/tmp/pwn4c-dnsmasq.pid"
+
 /* ── Radio mode states ────────────────────────────────────────────────────── */
 typedef enum {
     RADIO_DOWN    = 0,  /* boot-safe: radio administratively down            */
@@ -230,6 +245,22 @@ typedef struct {
     /* Saved pre-monitor radio state (for restoration) */
     int          saved_channel;
     radio_mode_t saved_radio_mode;
+
+    /* Evil twin (rogue_ap.c): hostapd on a dedicated __ap vif. */
+    struct {
+        bool    active;
+        bool    wpa;
+        bool    hidden;
+        bool    hostapd;
+        bool    dnsmasq;
+        bool    monitor_active;     /* a capture was live when we started    */
+        int     channel;
+        int     clients;
+        int64_t clients_ms;         /* last `iw station dump` refresh        */
+        int64_t start_ms;
+        char    ssid[ROGUE_SSID_MAX + 1];
+        uint8_t bssid[6];
+    } rogue;
 
     /* Signal flags (set by signal handler, read in main loop) */
     volatile int sig_term;
@@ -463,6 +494,19 @@ int     wifi_sta_connect(daemon_t *d, const char *ssid, const char *psk,
                          const char *mac, bool share);
 int     wifi_sta_status(daemon_t *d, char *out_json, size_t out_sz);
 int     wifi_sta_disconnect(daemon_t *d);
+
+/* rogue_ap.c — evil twin: hostapd on a dedicated __ap vif (START_ROGUE_AP) */
+/* Pure builders: the exact hostapd/dnsmasq text, covered by unit tests. */
+int         rogue_hostapd_conf(const char *ssid, const char *passphrase,
+                               int channel, bool hidden,
+                               char *out, size_t outsz);
+int         rogue_dnsmasq_conf(char *out, size_t outsz);
+/* Returns 0 on success, -1 on invalid params, -2 on a setup failure. */
+int         rogue_start(daemon_t *d, const char *ssid, const char *bssid,
+                        int channel, const char *passphrase, bool hidden);
+int         rogue_stop(daemon_t *d);
+const char *rogue_report(daemon_t *d);
+const char *rogue_error(void);
 
 /* mock.c */
 void    mock_run(daemon_t *d);

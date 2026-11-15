@@ -286,6 +286,7 @@ Without `persist`, a client disconnect tears the monitor interface down and rest
 
 **Errors:**
 - `ALREADY_MONITORING`: Monitor mode is already active. Send `STOP_MONITOR` first.
+- `ROGUE_AP_ACTIVE`: A rogue AP is running; stop it before starting monitor mode.
 - `INVALID_CHANNEL`: Channel outside the allowed range.
 - `INTERFACE_ERROR`: Failed to configure the wireless interface.
 
@@ -399,6 +400,7 @@ Switches the radio to a different channel while monitor mode is active.
 
 **Errors:**
 - `NOT_MONITORING`: Monitor mode is not active.
+- `ROGUE_AP_ACTIVE`: A rogue AP is pinned to its own channel; switching the shared phy would take the twin off the air.
 - `INVALID_CHANNEL`: Channel out of range.
 
 ---
@@ -439,6 +441,10 @@ Starts autonomous channel hopping directly inside the daemon event loop without 
   }
 }
 ```
+
+**Errors:**
+- `NOT_MONITORING`: Monitor mode is not active.
+- `ROGUE_AP_ACTIVE`: A rogue AP is running; hopping would drag the shared phy away from its channel.
 
 ---
 
@@ -986,6 +992,160 @@ reason as `GET_HANDSHAKES`. Stations are ordered newest observation first, so
 
 ---
 
+#### `START_ROGUE_AP` (Pwn4C extension)
+
+Brings up an evil twin: a rogue access point that copies a real network's
+SSID, BSSID and channel. The daemon adds a second virtual interface to the
+same phy (`iw ... interface add pwn4c-ap type __ap`), runs `hostapd` on it
+with a generated `/tmp/pwn4c-hostapd.conf`, and runs a second `dnsmasq`
+serving `192.168.66.0/24` on that interface only. The monitor interface keeps
+capturing on the shared channel — the twin and the capture are designed to run
+at the same time, which is what makes the kick-and-join flow work.
+
+- An absent or empty `passphrase` produces an **open** twin; an 8-63 character
+  passphrase produces **WPA2-PSK (CCMP)**. The passphrase is never written to
+  the config verbatim: it is first converted to the standard 64-hex WPA PSK
+  (PBKDF2-HMAC-SHA1, 4096 iterations, SSID as salt), and the SSID is written
+  as hex `ssid2`, so neither value can break out of the configuration file.
+- `hidden: true` sets `ignore_broadcast_ssid=1` (the twin does not advertise
+  its SSID).
+- The twin must share the channel of an active monitor session. Starting a
+  twin on a different channel than the running capture is refused, because
+  hostapd would silently drag the whole phy — the capture with it — onto the
+  twin's channel.
+
+**Request:**
+
+```json
+{
+  "id": "cmd-031",
+  "command": "START_ROGUE_AP",
+  "params": {
+    "ssid": "Home WiFi",
+    "bssid": "AA:BB:CC:DD:EE:FF",
+    "channel": 6,
+    "passphrase": "12345678",
+    "hidden": false
+  }
+}
+```
+
+**Parameters:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `ssid` | string | Yes | SSID the twin advertises (1-32 bytes) |
+| `bssid` | string | Yes | Real AP BSSID to copy (unicast MAC; becomes the twin's own address) |
+| `channel` | integer | Yes | Channel of the real AP (1-13); must match the active monitor's channel |
+| `passphrase` | string | No | WPA2 passphrase (8-63 chars); absent or empty = open network |
+| `hidden` | boolean | No | Hide the SSID (default `false`) |
+
+**Response:** the same payload as `GET_ROGUE_AP` (below).
+
+**Errors:**
+
+- `ALREADY_RUNNING`: a rogue AP is already running. Send `STOP_ROGUE_AP` first.
+- `INVALID_PARAMS`: missing/malformed `ssid`, `bssid` or `channel`; a group-address BSSID; a passphrase outside 8-63 characters.
+- `INTERFACE_ERROR`: the `pwn4c-ap` vif, hostapd or dnsmasq could not be set up; the monitor is on a different channel than the requested twin channel.
+
+---
+
+#### `STOP_ROGUE_AP` (Pwn4C extension)
+
+Tears the twin down: kills the hostapd and dnsmasq instances started for it
+(by PID file), flushes the `pwn4c-ap` address and deletes the vif. The command
+is **idempotent** — stopping a twin that is not running is not an error.
+
+The daemon also tears the twin down by itself whenever the radio leaves
+monitor mode: `STOP_MONITOR`, `RESTORE_NORMAL`, monitor TTL expiry and daemon
+shutdown all stop a running twin first, so the radio can never be left
+sharing the phy with a stale AP.
+
+**Request:**
+
+```json
+{
+  "id": "cmd-032",
+  "command": "STOP_ROGUE_AP",
+  "params": {}
+}
+```
+
+**Response:** the same payload as `GET_ROGUE_AP` (below), with
+`"active": false` after the stop.
+
+**Errors:** none.
+
+---
+
+#### `GET_ROGUE_AP` (Pwn4C extension)
+
+Reports the twin's current state.
+
+**Request:**
+
+```json
+{
+  "id": "cmd-033",
+  "command": "GET_ROGUE_AP",
+  "params": {}
+}
+```
+
+**Response (active WPA2 twin):**
+
+```json
+{
+  "id": "cmd-033",
+  "status": "ok",
+  "data": {
+    "active": true,
+    "ssid": "Home WiFi",
+    "bssid": "AA:BB:CC:DD:EE:FF",
+    "channel": 6,
+    "hidden": false,
+    "security": "wpa2-psk",
+    "interface": "pwn4c-ap",
+    "ip": "192.168.66.1",
+    "clients": 2,
+    "uptime_sec": 34,
+    "hostapd": true,
+    "dnsmasq": true,
+    "monitor_active": true
+  }
+}
+```
+
+**Response (no twin):**
+
+```json
+{
+  "id": "cmd-033",
+  "status": "ok",
+  "data": { "active": false }
+}
+```
+
+**Data fields:**
+
+| Field | Type | Description |
+|---|---|---|
+| `active` | boolean | Whether the twin is up |
+| `ssid` | string | SSID the twin advertises |
+| `bssid` | string | The twin's MAC (the copied real AP's BSSID), colon-separated uppercase |
+| `channel` | integer | Twin channel (equal to the monitor channel while both run) |
+| `hidden` | boolean | SSID is hidden |
+| `security` | string | `"wpa2-psk"` or `"open"` |
+| `interface` | string | The dedicated vif (`pwn4c-ap`) |
+| `ip` | string | Address on the twin's subnet (`192.168.66.1`) |
+| `clients` | integer | Stations hostapd currently has associated (refreshed from `iw station dump` at most every 2 s; the mock reports the mock inventory) |
+| `uptime_sec` | integer | Seconds since the twin started |
+| `hostapd` | boolean | The hostapd process is alive |
+| `dnsmasq` | boolean | The DHCP instance is alive (`false` = the twin serves no leases; handshakes are unaffected) |
+| `monitor_active` | boolean | Whether a capture was running when the twin started |
+
+---
+
 #### `WIFI_SCAN` (Pwn4C extension)
 
 Surveys nearby access points from the monitor radio without touching the
@@ -1269,6 +1429,8 @@ All error responses use this structure:
 | `NOT_MONITORING` | 409 | Command requires active monitor mode |
 | `ALREADY_MONITORING` | 409 | Monitor mode is already active |
 | `MONITORING_ACTIVE` | 409 | Operation blocked while monitoring |
+| `ROGUE_AP_ACTIVE` | 409 | Operation blocked while the evil twin is running |
+| `ALREADY_RUNNING` | 409 | A rogue AP is already running |
 | `TX_QUEUE_FULL` | 503 | Injection TX queue saturated |
 | `INTERFACE_ERROR` | 500 | Wireless interface operation failed |
 | `INTERNAL_ERROR` | 500 | Unexpected daemon error |

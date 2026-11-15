@@ -75,6 +75,47 @@ v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
 - **`flood` in the interactive shell**: menu entry 11 asks for beacon or auth
   and runs the same loop. The remaining entries shift down again (`stop` is now
   12, `reboot` 15).
+- **Evil twin (`pwn4c eviltwin`)**: the drone now runs a rogue access point
+  that copies a real network's SSID, BSSID and channel and captures what
+  clients send it. The daemon module (`daemon/rogue_ap.c`) adds a second
+  virtual interface to the same phy (`iw ... interface add pwn4c-ap type
+  __ap`), runs hostapd on it from a generated `/tmp` config, and runs a second
+  dnsmasq serving `192.168.66.0/24` on that interface only — so the monitor
+  vif keeps capturing on the shared channel, which is what makes the
+  kick-and-join flow work. The SSID goes into the config as hex `ssid2` and the
+  passphrase is turned into a 64-hex PSK before anything is written, so no
+  value is ever interpolated into a shell command or a config file. A WPA2
+  twin yields crackable 4-way handshakes when clients join it; an open twin
+  (empty passphrase) is for captive-portal style testing only and can never
+  produce one. `--kick` sends a broadcast deauth from the real BSSID first so
+  associated clients drop, rescan and see the twin; `--duration` bounds the
+  session; `-o` writes hashcat mode-22000 lines (default
+  `eviltwin.hc22000`) with the same writer `harvest` uses.
+- **`START_ROGUE_AP` / `STOP_ROGUE_AP` / `GET_ROGUE_AP` control commands**:
+  the daemon validates the SSID (1-32 bytes), a unicast BSSID and the channel
+  (1-13) before touching the radio; refuses a second twin (`ALREADY_RUNNING`);
+  refuses `SET_CHANNEL` and `HOP_START` while one runs (`ROGUE_AP_ACTIVE`);
+  and refuses a twin whose channel differs from the active monitor's, because
+  hostapd would silently drag the whole phy — the capture with it — onto the
+  twin's channel. `STOP_ROGUE_AP` is idempotent, and `STOP_MONITOR`,
+  `RESTORE_NORMAL`, monitor TTL expiry and daemon shutdown all tear the twin
+  down too. `GET_ROGUE_AP` reports the SSID, BSSID, channel, security, the
+  `pwn4c-ap` interface and IP, the associated-client count (refreshed from
+  `iw station dump` at most every 2 s) and whether hostapd and dnsmasq are
+  alive. DHCP is a convenience, not a prerequisite: the handshake does not
+  care whether dnsmasq started.
+- **Mock and test coverage for the twin**: mock mode exercises the full twin
+  lifecycle without a radio, `tests/test_rogue_ap.c` covers the hostapd and
+  dnsmasq config builders plus the start/stop/report lifecycle (59
+  assertions), `internal/drone/rogue_ap_test.go` pins the payload decoding and
+  parameter validation, `cmd/pwn4c/cmd/eviltwin_test.go` pins the CLI flag
+  validation, and `tests/mock_transcript.sh` asserts the twin end to end
+  (start, report, double-start refusal, channel-change refusal, stop
+  idempotence, restart).
+- **`eviltwin` in the interactive shell**: menu entry 12 twins the selected
+  network (or asks for the real AP's BSSID, SSID and channel) with a hidden
+  passphrase prompt, the same optional kick and the same hashcat output as the
+  CLI. The remaining entries shift down again (`stop` is now 13, `reboot` 16).
 
 ## [1.5.0] - 2026-11-15
 

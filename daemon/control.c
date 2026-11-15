@@ -239,6 +239,11 @@ static void tx_queue_flush_wait(daemon_t *d, int max_wait_ms)
  */
 void ctrl_teardown_monitor(daemon_t *d)
 {
+    /* The twin lives on its own vif but shares the phy, so it has to go before
+     * the radio is restored. This also covers STOP_MONITOR, the TTL expiry and
+     * daemon shutdown, where no monitor may be active at all. */
+    if (d->rogue.active) { (void)rogue_stop(d); }
+
     if (d->state != STATE_MONITORING && d->state != STATE_INJECTING
         && d->radio_mode != RADIO_MONITOR) { return; }
 
@@ -459,6 +464,14 @@ static void cmd_start_monitor(daemon_t *d, const char *id, const char *params)
         return;
     }
 
+    /* The twin owns the phy's AP side; a fresh capture session would move the
+     * channel out from under hostapd. */
+    if (d->rogue.active) {
+        send_error(d, id, "ROGUE_AP_ACTIVE",
+                   "A rogue AP is running; stop it before starting monitor mode");
+        return;
+    }
+
     /* Optional channel param */
     if (json_get_int(params, "channel", &channel) < 0) { channel = 1; }
     if (channel < CHAN_MIN || channel > CHAN_MAX) {
@@ -626,6 +639,14 @@ static void cmd_set_channel(daemon_t *d, const char *id, const char *params)
         return;
     }
 
+    /* hostapd pinned the twin to its channel; moving the shared phy would
+     * silently take the AP off the air. */
+    if (d->rogue.active && d->rogue.channel != channel) {
+        send_error(d, id, "ROGUE_AP_ACTIVE",
+                   "A rogue AP is pinned to this channel; stop it first");
+        return;
+    }
+
     t_before = util_monotonic_us();
 
     if (radio_set_channel(d, channel) < 0) {
@@ -653,6 +674,13 @@ static void cmd_hop_start(daemon_t *d, const char *id, const char *params)
     if (d->state != STATE_MONITORING && d->state != STATE_INJECTING) {
         send_error(d, id, "NOT_MONITORING",
                    "Monitor mode must be active before starting channel hopper");
+        return;
+    }
+
+    /* Hopping would drag the shared phy away from the twin's channel. */
+    if (d->rogue.active) {
+        send_error(d, id, "ROGUE_AP_ACTIVE",
+                   "A rogue AP is running; stop it before hopping");
         return;
     }
 
@@ -1121,6 +1149,62 @@ static void cmd_get_clients(daemon_t *d, const char *id, const char *params)
     send_ok(d, id, json);
 }
 
+/* ── Evil twin (START_ROGUE_AP / STOP_ROGUE_AP / GET_ROGUE_AP) ─────────────── */
+
+static void cmd_start_rogue_ap(daemon_t *d, const char *id, const char *params)
+{
+    char ssid[64];
+    char bssid[32];
+    char passphrase[80];
+    int  channel = 0;
+    bool hidden  = false;
+    int  rc;
+
+    if (d->rogue.active) {
+        send_error(d, id, "ALREADY_RUNNING", "A rogue AP is already running");
+        return;
+    }
+
+    if (json_get_str(params, "ssid", ssid, sizeof(ssid)) < 0) {
+        send_error(d, id, "INVALID_PARAMS", "Missing ssid parameter");
+        return;
+    }
+    if (json_get_str(params, "bssid", bssid, sizeof(bssid)) < 0) {
+        send_error(d, id, "INVALID_PARAMS", "Missing bssid parameter");
+        return;
+    }
+    if (json_get_int(params, "channel", &channel) < 0) {
+        send_error(d, id, "INVALID_PARAMS", "Missing channel parameter");
+        return;
+    }
+
+    /* An absent or empty passphrase means an open twin. */
+    passphrase[0] = '\0';
+    (void)json_get_str(params, "passphrase", passphrase, sizeof(passphrase));
+    (void)json_get_bool(params, "hidden", &hidden);
+
+    rc = rogue_start(d, ssid, bssid, channel, passphrase, hidden);
+    if (rc != 0) {
+        send_error(d, id, (rc == -1) ? "INVALID_PARAMS" : "INTERFACE_ERROR",
+                   rogue_error());
+        return;
+    }
+
+    send_ok(d, id, rogue_report(d));
+}
+
+static void cmd_stop_rogue_ap(daemon_t *d, const char *id)
+{
+    /* Idempotent: a client may clean up after a crash or a lost connection. */
+    (void)rogue_stop(d);
+    send_ok(d, id, rogue_report(d));
+}
+
+static void cmd_get_rogue_ap(daemon_t *d, const char *id)
+{
+    send_ok(d, id, rogue_report(d));
+}
+
 /* ── Wi-Fi management (WIFI_SCAN / WIFI_CONNECT / WIFI_STATUS / DISCONNECT)  */
 
 static void cmd_wifi_scan(daemon_t *d, const char *id, const char *params)
@@ -1548,6 +1632,12 @@ int ctrl_handle_line(daemon_t *d, const char *line)
         cmd_get_handshakes(d, id, params);
     } else if (strcmp(cmd, "GET_CLIENTS") == 0) {
         cmd_get_clients(d, id, params);
+    } else if (strcmp(cmd, "START_ROGUE_AP") == 0) {
+        cmd_start_rogue_ap(d, id, params);
+    } else if (strcmp(cmd, "STOP_ROGUE_AP") == 0) {
+        cmd_stop_rogue_ap(d, id);
+    } else if (strcmp(cmd, "GET_ROGUE_AP") == 0) {
+        cmd_get_rogue_ap(d, id);
     } else if (strcmp(cmd, "WIFI_SCAN") == 0) {
         cmd_wifi_scan(d, id, params);
     } else if (strcmp(cmd, "WIFI_CONNECT") == 0) {

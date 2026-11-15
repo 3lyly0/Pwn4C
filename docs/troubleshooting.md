@@ -671,6 +671,85 @@ pwn4c auth-flood -b AA:BB:CC:DD:EE:FF -c 6 -n 500
 
 ---
 
+## The Evil Twin Does Not Come Up (or Nobody Joins It)
+
+### Symptom
+
+`pwn4c eviltwin` fails with `[!] failed to start the twin: ...`, or the twin
+runs but `GET_ROGUE_AP` keeps reporting `"clients": 0` and no handshake is
+ever captured.
+
+### Causes and fixes
+
+**1. hostapd died during setup.** The single radio is running one phy for two
+roles: the monitor capture and the twin's AP. mac80211 usually allows the
+combination, but mt7603 is not guaranteed to on every firmware build. The
+error message says so explicitly; confirm with the log:
+
+```bash
+cat /tmp/pwn4c-hostapd.log
+```
+
+A twin that cannot coexist with the monitor is a firmware-level limit, not a
+CLI bug — run it with `--no-monitor` (no capture, no `--kick`, handshakes are
+then lost with the session) or on a build with a newer mt76.
+
+**2. The monitor is on a different channel than the twin.** The daemon refuses
+to start a twin whose channel differs from the active capture's, because
+hostapd would silently drag the whole phy — the capture with it — onto the
+twin's channel. The error names both channels:
+
+> monitor is on channel 6; switch it to 11 before starting the twin
+
+Pass the same `-c` you want the monitor on, or switch first.
+
+**3. Nothing forces a client to the twin.** A client that is happily
+associated to the real AP does not rescan just because a copy appeared. Use
+`--kick`: a short broadcast deauth burst from the real BSSID drops its
+stations, they rescan, and the twin — same SSID, same BSSID, often the
+strongest signal — wins the reassociation. Without the kick only a client
+that connects on its own produces anything.
+
+**4. An open twin can never produce a handshake.** Without a passphrase there
+is no 4-way handshake to capture; the command says so in its hints. Give the
+twin the real network's security (`--passphrase`, 8-63 chars) if the goal is
+hashcat 22000 output.
+
+**5. dnsmasq did not start.** The twin still comes up and handshakes are
+unaffected, but clients get no DHCP lease, so a phone that joins may show
+"no internet" and drop off again before you see it. Check
+`"dnsmasq": false` in `GET_ROGUE_AP` and `/tmp/pwn4c-dnsmasq.log`; the usual
+cause is a second dnsmasq instance that failed to bind. Clients with a static
+address can still join.
+
+**6. A BSSID filter from an earlier `listen` is still installed.** Like
+`harvest` and `clients`, `eviltwin` clears it at start — but if you started a
+capture session yourself and then run the twin manually, the filter would
+hide exactly the frames the twin needs. A fresh `pwn4c monitor` run without
+`--filter-bssid` clears it; or just stop and restart the monitor session:
+
+```bash
+pwn4c monitor -c 6 --seconds 2 -o /dev/null   # filter-less session clears the BPF filter
+```
+
+**7. Wrong identity copy.** The twin's SSID, BSSID and channel must match the
+real AP. Some clients validate the BSSID they reconnect to; a mismatched pair
+is ignored. Confirm all three with `pwn4c networks` before starting.
+
+### Verification
+
+```bash
+# Run the twin and watch it catch clients; every unit is written to -o
+pwn4c eviltwin -b AA:BB:CC:DD:EE:FF -s lab-net -c 6 --passphrase '12345678' --kick --duration 120 -o eviltwin.hc22000
+
+# On the drone itself
+iw dev pwn4c-ap station dump   # who associated to the twin
+cat /tmp/pwn4c-hostapd.log     # why hostapd refused, if it did
+cat /tmp/pwn4c-dnsmasq.log     # why DHCP is silent, if it is
+```
+
+---
+
 ## Dropped Frames on High-Traffic Channels
 
 ### Symptom
