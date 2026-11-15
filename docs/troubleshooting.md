@@ -531,6 +531,48 @@ pwn4c harvest -b AA:BB:CC:DD:EE:FF -c 6 --deauth --timeout 60 -o hs.hc22000
 
 ---
 
+## `csa` Does Not Move Clients
+
+### Symptom
+
+The injection reports accepted frames, but no client shows up on the target
+channel and the network keeps working as if nothing happened.
+
+### Causes and fixes
+
+**1. The beacon has no SSID.** In beacon mode the frame must look like the AP's
+own beacon. Without `-s` the SSID element is empty and clients discard the
+frame. Pass the real SSID (take it from `pwn4c networks`).
+
+**2. The frames went out on the wrong channel.** CSA is injected on the channel
+the AP is currently using, not the target one. Pass `-c` explicitly, or let the
+drone's current monitor channel be used (the default when monitor mode is
+already active).
+
+**3. The real AP keeps beaconing.** A client that obeys the CSA still hears its
+AP on the old channel, so it returns. CSA alone is a herd step, not a takeover:
+it is useful right before an evil twin answers on the new channel, or to prove
+that a client is CSA-hardened when it refuses to move.
+
+**4. Broadcast action frames are ignored.** With `--mode action`, pass
+`--client <MAC>` to unicast the announcement; most stacks drop the broadcast
+form.
+
+**5. The client is not associated to that BSSID.** CSA only affects clients of
+the impersonated AP. Confirm the BSSID from `pwn4c networks`.
+
+### Verification
+
+```bash
+# Watch the target channel while the announcement runs
+pwn4c csa -b AA:BB:CC:DD:EE:FF -s lab-net -c 6 --to 11 -n 20 --follow
+```
+
+`--follow` moves the radio to the new channel and keeps monitoring, so a client
+that obeyed appears in the capture immediately.
+
+---
+
 ## Dropped Frames on High-Traffic Channels
 
 ### Symptom

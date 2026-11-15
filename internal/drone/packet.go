@@ -92,11 +92,49 @@ func BuildManagementFrame(bssidStr, clientStr string, reasonCode uint16,
 		}
 	}
 
-	channel := opts.Channel
-	if channel < 1 || channel > 14 {
-		channel = 1
+	frame := make([]byte, 0, 16+24+2)
+
+	// 1. RadioTap header (16 bytes, fields present: Flags/Rate/Channel/TX).
+	frame = append(frame, radiotapHeader(opts.Channel, opts.RateMbps)...)
+
+	// 2. 802.11 management header.
+	fc := byte(0xc0) // Deauthentication
+	if opts.Disassoc {
+		fc = 0xa0 // Disassociation
 	}
-	rate := opts.RateMbps
+
+	tx, rx := bssid, client
+	if opts.Reverse && !broadcast {
+		tx, rx = client, bssid
+	}
+	frame = append(frame, mgmtHeader(fc, rx, tx, bssid, 0)...)
+	frame = append(frame, byte(reasonCode&0xff), byte((reasonCode>>8)&0xff))
+
+	return hex.EncodeToString(frame), nil
+}
+
+// normalizeChannel clamps a channel to the 2.4 GHz range the MT7628N supports.
+func normalizeChannel(channel int) int {
+	if channel < 1 || channel > 14 {
+		return 1
+	}
+	return channel
+}
+
+// channelFrequency maps a 2.4 GHz channel to its centre frequency in MHz.
+func channelFrequency(channel int) int {
+	if channel == 14 {
+		return 2484
+	}
+	return 2407 + channel*5
+}
+
+// radiotapHeader builds the 16-byte RadioTap header used for monitor-mode
+// injection: Flags, Rate, Channel and TX flags. Without rate and channel the
+// mt76 driver accepts the frame and transmits nothing.
+func radiotapHeader(channel int, rateMbps float64) []byte {
+	channel = normalizeChannel(channel)
+	rate := rateMbps
 	if rate <= 0 {
 		rate = 1
 	}
@@ -105,46 +143,33 @@ func BuildManagementFrame(bssidStr, clientStr string, reasonCode uint16,
 		rateField = 2 // 1 Mbps
 	}
 
-	frame := make([]byte, 0, 16+24+2)
-
-	// 1. RadioTap header (16 bytes, fields present: Flags/Rate/Channel/TX).
-	frame = append(frame,
+	hdr := make([]byte, 0, 16)
+	hdr = append(hdr,
 		0x00, 0x00, // version, pad
 		0x10, 0x00, // it_len = 16
 		0x1e, 0x00, 0x00, 0x00, // present: bits 1..4
 		0x00,      // Flags
 		rateField, // Rate (500 kbps units)
 	)
-	freq := 2412
-	if channel == 14 {
-		freq = 2484
-	} else {
-		freq = 2407 + channel*5
-	}
+
 	var chbuf [4]byte
-	binary.LittleEndian.PutUint16(chbuf[0:2], uint16(freq))
+	binary.LittleEndian.PutUint16(chbuf[0:2], uint16(channelFrequency(channel)))
 	binary.LittleEndian.PutUint16(chbuf[2:4], 0x00a0) // 2 GHz, CCK
-	frame = append(frame, chbuf[:]...)
-	frame = append(frame, 0x10, 0x00) // TX flags: NO_ACK
+	hdr = append(hdr, chbuf[:]...)
+	hdr = append(hdr, 0x10, 0x00) // TX flags: NO_ACK
+	return hdr
+}
 
-	// 2. 802.11 management header.
-	fc := byte(0xc0) // Deauthentication
-	if opts.Disassoc {
-		fc = 0xa0 // Disassociation
-	}
-	frame = append(frame, fc, 0x00)   // Frame Control
-	frame = append(frame, 0x00, 0x00) // Duration
-
-	tx, rx := bssid, client
-	if opts.Reverse && !broadcast {
-		tx, rx = client, bssid
-	}
-	frame = append(frame, rx...)    // Addr1: receiver
-	frame = append(frame, tx...)    // Addr2: transmitter
-	frame = append(frame, bssid...) // Addr3: BSSID
-
-	frame = append(frame, 0x00, 0x00) // Sequence Control
-	frame = append(frame, byte(reasonCode&0xff), byte((reasonCode>>8)&0xff))
-
-	return hex.EncodeToString(frame), nil
+// mgmtHeader builds the 24-byte 802.11 management header without a body.
+// Sequence Control carries the sequence number in bits 4-15 and a zero
+// fragment number.
+func mgmtHeader(fc byte, addr1, addr2, addr3 []byte, seq uint16) []byte {
+	hdr := make([]byte, 0, 24)
+	hdr = append(hdr, fc, 0x00)   // Frame Control
+	hdr = append(hdr, 0x00, 0x00) // Duration
+	hdr = append(hdr, addr1...)
+	hdr = append(hdr, addr2...)
+	hdr = append(hdr, addr3...)
+	hdr = append(hdr, byte(seq<<4), byte(seq>>4)) // Sequence Control
+	return hdr
 }

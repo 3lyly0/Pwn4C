@@ -30,6 +30,14 @@ v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
   writer, without leaving the session. Both paths also clear any BSSID frame
   filter left behind by an earlier `listen`, which would otherwise hide the
   beacons needed for the ESSID.
+- **Channel Switch Announcements (`pwn4c csa`)**: spoofs the AP's beacon (or a
+  Spectrum Management action frame) with a CSA element to move associated
+  clients to another channel — the herd step before an evil twin, and a direct
+  test of CSA hardening. The frame builder (`internal/drone/csa.go`) is a pure
+  function with unit tests, and shares the RadioTap/management-header helpers
+  with the deauth builder. Each announcement carries an incrementing sequence
+  number and a countdown so clients do not discard the copies as duplicates;
+  `--follow` leaves the radio watching the new channel.
 
 ## [1.5.0] - 2026-11-15
 
