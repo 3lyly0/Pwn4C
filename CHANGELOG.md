@@ -3,7 +3,7 @@
 All notable changes to Pwn4C are documented here. For releases prior to
 v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
 
-## [Unreleased]
+## [1.5.0] - 2026-11-15
 
 ### Fixed
 - **Boolean parameters were ignored:** the Go CLI sends real JSON booleans
