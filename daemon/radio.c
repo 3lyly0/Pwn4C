@@ -232,11 +232,13 @@ int radio_detect_ifaces(daemon_t *d)
         if (ap[0] == '\0'
             && (strcmp(type, "AP") == 0 || strcmp(type, "monitor") == 0
                 || strcmp(type, "P2P-GO") == 0)) {
-            (void)snprintf(ap, sizeof(ap), "%s", names[i]);
+            /* %.15s: gcc 12 cannot prove names[i] is NUL-terminated inside
+             * IFNAMSIZ and flags a truncation that cannot happen. */
+            (void)snprintf(ap, sizeof(ap), "%.15s", names[i]);
         }
         if (sta[0] == '\0'
             && (strcmp(type, "managed") == 0 || strcmp(type, "station") == 0)) {
-            (void)snprintf(sta, sizeof(sta), "%s", names[i]);
+            (void)snprintf(sta, sizeof(sta), "%.15s", names[i]);
         }
     }
 
