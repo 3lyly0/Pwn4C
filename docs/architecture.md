@@ -56,8 +56,9 @@ graph LR
 
 The Drone performs no attack logic. Its only frame analysis is the bounded
 EAPOL-Key decoding (plus the SSID extraction it shares with the survey parser)
-that feeds the handshake table behind `GET_HANDSHAKES`; formatting, cracking and
-scheduling all happen on the Host.
+that feeds the handshake table behind `GET_HANDSHAKES`, and the station
+observation parser that feeds the inventory behind `GET_CLIENTS`; formatting,
+cracking and scheduling all happen on the Host.
 
 ### Host Responsibilities
 
@@ -253,6 +254,8 @@ See [api_reference.md](api_reference.md#udp-frame-stream-format) for byte-level 
 **Frame Streamer**: Reads frames from the ring buffer, prepends the 16-byte stream header, sends UDP datagrams to the Host's IP (learned from the TCP connection's peer address). Fragmentation logic splits frames exceeding 1472 bytes (1500 MTU minus 20 IP minus 8 UDP overhead).
 
 **Handshake Harvester**: Every frame delivered by the capture socket passes through a standalone EAPOL-Key parser (`eapol_parse.c`, no daemon state, no allocation) before it enters the ring, so a full ring or a slow client cannot hide an exchange. Decoded messages update a bounded table of 16 `(BSSID, STA)` slots (`handshake.c`): an AP-side message supplies the ANonce and, when the AP includes the RSN PMKID KDE, the PMKID; a client-side message supplies the MIC and the client's verbatim EAPOL frame. A small `BSSID -> SSID` cache is filled from beacons and probe responses because hashcat mode 22000 needs the ESSID. `GET_HANDSHAKES` reports only ready units, six per page. The table is reset by `START_MONITOR` but survives `STOP_MONITOR`, so the host can stop the radio and still collect the result.
+
+**Station Inventory**: The same capture loop feeds a second standalone parser (`client_parse.c`), which turns one frame into one station observation: a probe request (the station and the SSID it is looking for — its PNL entry), an authentication or association request, a ToDS/FromDS data frame, or a deauth/disassoc (which clears the association flag but keeps the station). `clients.c` keeps at most 32 station slots with the BSSID, last antenna signal, probed SSID, frame count and first/last-seen timestamps; when the table is full it evicts the station that has been quiet the longest. `GET_CLIENTS` pages six stations per response, newest observation first. Like the handshake table it is reset by `START_MONITOR` and survives `STOP_MONITOR`. Both parsers share the radiotap walker in `beacon_parse.c` (`scan_radiotap`), so the field walk — including extended present bitmaps — exists once.
 
 **Wireless Interface Manager**: Abstraction layer over `iw` and `ip link`. Manages monitor mode transitions, channel switching, TX power, and MAC randomization. Wraps `system()` calls with 2-second timeout enforcement to prevent daemon hangs from unresponsive drivers. MAC and TX-power changes are persisted to UCI and read back from the driver, so the daemon reports what the hardware actually applied.
 

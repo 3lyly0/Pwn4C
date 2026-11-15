@@ -38,6 +38,29 @@ v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
   with the deauth builder. Each announcement carries an incrementing sequence
   number and a countdown so clients do not discard the copies as duplicates;
   `--follow` leaves the radio watching the new channel.
+- **Station inventory (`pwn4c clients`)**: the daemon now keeps a bounded
+  32-slot table of stations seen on the air — associated clients and
+  probe-only ones. A standalone parser (`daemon/client_parse.c`) turns each
+  captured frame into an observation: probe request (the station's PNL entry),
+  auth/association request, ToDS/FromDS data, and deauth/disassoc (which clears
+  the association flag but keeps the station). `daemon/clients.c` tracks the
+  BSSID, last RSSI, probed SSID, frame count and first/last-seen timestamps, and
+  evicts the station that has been quiet the longest when the table is full.
+  `pwn4c clients` prints a table or `--json`, filters with `--bssid`,
+  `--assoc-only` and `--min-rssi`, and refreshes with `--watch`.
+- **`GET_CLIENTS` control command**: pages through the inventory (six stations
+  per page, same 8 KB limit as `GET_HANDSHAKES`), accepts `{"reset":true}`, and
+  survives `STOP_MONITOR`. MACs are serialised uppercase; the host normalises
+  them for display.
+- **Mock and test coverage for the inventory**: mock mode now feeds one
+  associated client and one probe-only client, `tests/test_clients.c` covers the
+  parser and table (56 assertions across both suites), and
+  `internal/drone/clients_test.go` pins the payload decoding and display
+  helpers.
+- **`clients` in the interactive shell**: menu entry 10 inventories the stations
+  around the selected network (or a channel you type) and prints the same table
+  as the CLI. The remaining entries shift down by one (`stop` is now 11,
+  `reboot` 14).
 
 ## [1.5.0] - 2026-11-15
 

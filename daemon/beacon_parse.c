@@ -34,7 +34,7 @@ static const uint8_t RT_FIELD_ALIGN[16] = {
  * Handles extended present bitmaps (bit 31 of each word continues the list).
  */
 static void rt_walk(const uint8_t *rt, size_t rt_len,
-                    int *signal_dbm, int *freq_mhz)
+                    int *signal_dbm, int *freq_mhz, bool *has_signal)
 {
     uint32_t words[8];
     size_t   num_words = 0;
@@ -43,6 +43,7 @@ static void rt_walk(const uint8_t *rt, size_t rt_len,
 
     *signal_dbm = 0;
     *freq_mhz   = 0;
+    *has_signal = false;
 
     /* 1. Walk all present bitmaps. In radiotap, every present word has
      * bit 31 set if another present word follows immediately. */
@@ -77,10 +78,30 @@ static void rt_walk(const uint8_t *rt, size_t rt_len,
             *freq_mhz = (int)rt[data_off] | ((int)rt[data_off + 1] << 8);
         } else if (i == 5 && size == 1) {
             *signal_dbm = (int8_t)rt[data_off];
+            *has_signal = true;
         }
 
         data_off += size;
     }
+}
+
+/*
+ * scan_radiotap — Locate the 802.11 header inside a RadioTap frame and read
+ * the antenna signal and frequency when present. Shared by every frame parser
+ * so the field walk (including extended present bitmaps) exists once.
+ */
+int scan_radiotap(const uint8_t *frame, size_t len, rt_info_t *out)
+{
+    size_t rt;
+
+    if (!frame || !out || len < 8) { return -1; }
+
+    rt = (size_t)frame[2] | ((size_t)frame[3] << 8);
+    if (rt < 8 || rt > len) { return -1; }
+
+    out->rt_len = rt;
+    rt_walk(frame, rt, &out->signal_dbm, &out->freq_mhz, &out->has_signal);
+    return 0;
 }
 
 /* ── Beacon parsing ───────────────────────────────────────────────────────── */
@@ -150,7 +171,7 @@ static void wsc_parse(const uint8_t *data, size_t len, scan_net_t *out)
 int scan_parse_beacon(const uint8_t *frame, size_t len,
                       int fallback_channel, scan_net_t *out)
 {
-    size_t   rt;
+    rt_info_t info;
     size_t   body;
     size_t   ies_len;
     size_t   p;
@@ -165,21 +186,22 @@ int scan_parse_beacon(const uint8_t *frame, size_t len,
     if (!frame || !out || len < 24) { return -1; }
     memset(out, 0, sizeof(*out));
 
-    rt = (size_t)frame[2] | ((size_t)frame[3] << 8);
-    if (rt < 8 || rt + 24 > len) { return -1; }
+    if (scan_radiotap(frame, len, &info) < 0) { return -1; }
+    if (info.rt_len + 24 > len) { return -1; }
 
-    rt_walk(frame, rt, &signal_dbm, &freq_mhz);
+    signal_dbm = info.signal_dbm;
+    freq_mhz   = info.freq_mhz;
 
-    fc0 = frame[rt];
+    fc0 = frame[info.rt_len];
     if ((fc0 & 0x0cu) != 0x00u) { return -1; }          /* management frames only */
     subtype = (uint8_t)((fc0 >> 4) & 0x0fu);
     if (subtype != 0x08u && subtype != 0x05u) { return -1; }  /* beacon / probe resp */
 
     /* BSSID = Address 3 for beacons and probe responses */
-    memcpy(out->bssid, frame + rt + 16, 6);
+    memcpy(out->bssid, frame + info.rt_len + 16, 6);
     if (memcmp(out->bssid, SCAN_BROADCAST_MAC, 6) == 0) { return -1; }
 
-    body    = rt + 24;
+    body    = info.rt_len + 24;
     ies_len = len - body - 12;   /* fixed parameters: timestamp 8 + beacon itv 2 + capab 2 */
     if (body + 12 > len || ies_len < 2) {
         ies_len = 0;

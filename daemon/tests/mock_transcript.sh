@@ -183,6 +183,33 @@ hsr = send_cmd({"id": "cmd-hs-reset", "command": "GET_HANDSHAKES", "params": {"r
 assert hsr["status"] == "ok" and hsr["data"]["count"] == 0, hsr
 print("    [assert GET_HANDSHAKES reset clears the table: PASS]")
 
+# 7b. Station inventory: mock mode feeds one client that probes for the AP's
+# SSID and associates, and one that only probes for a different network (the
+# PNL case). Newest observation first.
+cl = None
+for _ in range(20):
+    cl = send_cmd({"id": "cmd-cl", "command": "GET_CLIENTS", "params": {}})
+    if cl.get("status") == "ok" and cl["data"]["count"] >= 2:
+        break
+    time.sleep(0.1)
+assert cl["status"] == "ok", f"GET_CLIENTS failed: {cl}"
+assert cl["data"]["count"] == 2, f"Expected 2 stations, got {cl}"
+assert cl["data"]["tracked"] == 2, f"Expected 2 tracked slots, got {cl}"
+stations = {c["sta"]: c for c in cl["data"]["clients"]}
+assert set(stations) == {"02:00:00:BE:EF:02", "02:00:00:BE:EF:03"}, stations
+assoc_sta = stations["02:00:00:BE:EF:02"]
+probe_sta = stations["02:00:00:BE:EF:03"]
+assert assoc_sta["bssid"] == "02:00:00:DE:AD:01", assoc_sta
+assert assoc_sta["associated"] is True, assoc_sta
+assert assoc_sta["probed"] is True, assoc_sta
+assert assoc_sta["ssid"] == "mock-lab", assoc_sta
+assert assoc_sta["ssid_hex"] == "6d6f636b2d6c6162", assoc_sta
+assert assoc_sta["frames"] == 3, assoc_sta
+assert probe_sta["associated"] is False, probe_sta
+assert probe_sta["probed"] is True, probe_sta
+assert probe_sta["ssid"] == "other-net", probe_sta
+print("    [assert GET_CLIENTS: 1 associated + 1 PNL-only station: PASS]")
+
 hop_stop = send_cmd({"id": "cmd-7", "command": "HOP_STOP", "params": {}})
 assert hop_stop["status"] == "ok" and hop_stop["data"]["hop_active"] is False
 print("    [assert HOP_STOP: PASS]")
@@ -190,6 +217,16 @@ print("    [assert HOP_STOP: PASS]")
 stop_mon = send_cmd({"id": "cmd-8", "command": "STOP_MONITOR", "params": {}})
 assert stop_mon["status"] == "ok" and stop_mon["data"]["monitor_active"] is False
 print("    [assert STOP_MONITOR: PASS]")
+
+# The inventory must outlive the radio, so a client can stop the capture and
+# still read who was there.
+cl_after = send_cmd({"id": "cmd-cl-after", "command": "GET_CLIENTS", "params": {}})
+assert cl_after["status"] == "ok" and cl_after["data"]["count"] == 2, cl_after
+print("    [assert GET_CLIENTS survives STOP_MONITOR: PASS]")
+
+cl_reset = send_cmd({"id": "cmd-cl-reset", "command": "GET_CLIENTS", "params": {"reset": True}})
+assert cl_reset["status"] == "ok" and cl_reset["data"]["count"] == 0, cl_reset
+print("    [assert GET_CLIENTS reset clears the table: PASS]")
 
 rest = send_cmd({"id": "cmd-9", "command": "RESTORE_NORMAL", "params": {}})
 assert rest["status"] == "ok" and rest["data"]["mode"] == "normal"

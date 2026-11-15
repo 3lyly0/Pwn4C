@@ -111,10 +111,11 @@ const shellMenu = `
   7) listen       capture the selected network into a PCAP (Ctrl+C stops)
   8) deauth       deauth the selected network, then capture automatically
   9) harvest      capture a crackable handshake/PMKID, write a hashcat file
- 10) stop         stop monitor mode / hopping
- 11) hop          hop across channels (default 1,6,11)
- 12) power        set TX power (1-20 dBm)
- 13) reboot       reboot the drone
+ 10) clients      inventory stations (associated clients + PNL probes)
+ 11) stop         stop monitor mode / hopping
+ 12) hop          hop across channels (default 1,6,11)
+ 13) power        set TX power (1-20 dBm)
+ 14) reboot       reboot the drone
   q) quit
 
 `
@@ -180,13 +181,15 @@ func (s *shellState) dispatch(line string) bool {
 		s.doListen(true)
 	case "9", "harvest":
 		s.doHarvest()
-	case "10", "stop":
+	case "10", "clients":
+		s.doClients()
+	case "11", "stop":
 		s.doStop()
-	case "11", "hop":
+	case "12", "hop":
 		s.doHop(arg)
-	case "12", "power":
+	case "13", "power":
 		s.doPower(arg)
-	case "13", "reboot":
+	case "14", "reboot":
 		s.doReboot()
 	case "menu", "help", "h", "?":
 		// the menu prints every round already
@@ -683,6 +686,92 @@ func (s *shellState) doHarvest() {
 	if err := writeHarvest(units, outPath); err != nil {
 		fmt.Printf("[!] %v\n", err)
 	}
+}
+
+// doClients inventories the stations around the selected network (or a channel
+// the operator types) and prints them as a table, reusing the CLI's collectors
+// so the shell and the standalone command agree.
+func (s *shellState) doClients() {
+	channel := 6
+
+	if s.selected != nil {
+		channel = s.selected.channel
+		fmt.Printf("[*] Inventorying stations around %s (BSSID %s, ch%d).\n",
+			s.selected.ssid, s.selected.bssid, s.selected.channel)
+	} else {
+		fmt.Printf("[*] No network selected — listening on channel %d.\n", channel)
+		fmt.Print("[*] Channel to listen on (empty = 6): ")
+		v, err := s.readLine()
+		if err != nil {
+			return
+		}
+		if v = strings.TrimSpace(v); v != "" {
+			if ch, err := strconv.Atoi(v); err == nil && ch >= 1 && ch <= 13 {
+				channel = ch
+			} else {
+				fmt.Println("[!] Invalid channel — staying on 6.")
+			}
+		}
+	}
+
+	seconds := 20
+	fmt.Printf("[*] Listen for N seconds (empty = %d): ", seconds)
+	v, err := s.readLine()
+	if err != nil {
+		return
+	}
+	if v = strings.TrimSpace(v); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 3600 {
+			seconds = n
+		} else {
+			fmt.Printf("[!] Invalid duration — using %ds.\n", seconds)
+		}
+	}
+
+	st, err := s.client.GetStatus()
+	if err != nil {
+		fmt.Printf("[!] %v\n", err)
+		return
+	}
+
+	weStarted := false
+	if !st.MonitorActive {
+		if err := s.client.StartMonitor(channel); err != nil {
+			fmt.Printf("[!] Failed to enter monitor mode: %v\n", err)
+			return
+		}
+		weStarted = true
+	} else if st.Channel != channel {
+		if err := s.client.SetChannel(channel); err != nil {
+			fmt.Printf("[!] Failed to switch channel: %v\n", err)
+			return
+		}
+	}
+
+	// A BSSID filter from an earlier listen session would hide every other
+	// station; the inventory wants the whole channel.
+	if err := s.client.SetFilter(false, ""); err != nil {
+		fmt.Printf("[!] Warning: failed to clear the frame filter: %v\n", err)
+	}
+
+	// A running session may already hold stations from an earlier run.
+	if _, err := s.client.GetClients(0, true); err != nil {
+		fmt.Printf("[!] Warning: failed to reset the client table: %v\n", err)
+	}
+
+	stations := collectClients(s.client, channel, seconds)
+
+	if weStarted {
+		s.stopMonitorQuietly()
+	}
+
+	stations = filterClients(stations)
+	if len(stations) == 0 {
+		fmt.Println("[-] No stations heard.")
+		fmt.Println("    Try a longer listen or another channel ('pwn4c networks').")
+		return
+	}
+	printClientTable(stations, channel)
 }
 
 // stopMonitorQuietly restores the radio after a listen session. Leaving monitor

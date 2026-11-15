@@ -882,6 +882,110 @@ ESSID cannot be rendered: hashcat mode 22000 requires it.
 
 ---
 
+#### `GET_CLIENTS` (Pwn4C extension)
+
+Reports the station inventory the daemon has built from the live capture. Every
+captured frame is parsed for a station observation:
+
+- **probe request** — the station exists and is looking for an SSID (its PNL
+  entry); the BSSID is empty for a wildcard probe;
+- **authentication / association request** — the station is joining a BSSID;
+- **data frame** (ToDS or FromDS) — the station is associated and active;
+- **deauthentication / disassociation** — the AP just kicked it, so the
+  association flag is cleared but the station stays in the table.
+
+The table holds 32 stations. When it is full the station that has been quiet
+the longest is evicted. Like `GET_HANDSHAKES`, it is cleared by `START_MONITOR`
+(and by `"reset": true`) but **survives `STOP_MONITOR`**.
+
+**Request:**
+
+```json
+{
+  "id": "cmd-021",
+  "command": "GET_CLIENTS",
+  "params": { "offset": 0 }
+}
+```
+
+**Parameters:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `offset` | integer | No | Index of the first station to return (default `0`) |
+| `reset` | boolean | No | Clear the table before answering |
+
+**Response:**
+
+```json
+{
+  "id": "cmd-021",
+  "status": "ok",
+  "data": {
+    "count": 2,
+    "tracked": 2,
+    "offset": 0,
+    "returned": 2,
+    "truncated": false,
+    "clients": [
+      {
+        "sta": "02:00:00:BE:EF:02",
+        "bssid": "02:00:00:DE:AD:01",
+        "associated": true,
+        "probed": true,
+        "ssid": "mock-lab",
+        "ssid_len": 8,
+        "ssid_hex": "6d6f636b2d6c6162",
+        "rssi": -42,
+        "has_rssi": true,
+        "frames": 3,
+        "age_ms": 120
+      },
+      {
+        "sta": "02:00:00:BE:EF:03",
+        "bssid": "",
+        "associated": false,
+        "probed": true,
+        "ssid": "other-net",
+        "ssid_len": 9,
+        "ssid_hex": "6f746865722d6e6574",
+        "rssi": 0,
+        "has_rssi": false,
+        "frames": 1,
+        "age_ms": 80
+      }
+    ]
+  }
+}
+```
+
+**Data fields:**
+
+| Field | Type | Description |
+|---|---|---|
+| `count` | integer | Total stations in the table |
+| `tracked` | integer | Occupied slots (equal to `count` today) |
+| `offset` | integer | Offset this page starts at (clamped to `count`) |
+| `returned` | integer | Stations in this page (at most 6) |
+| `truncated` | boolean | More stations exist past this page; request `offset + returned` |
+| `clients[].sta` | string | Station MAC, colon-separated, uppercase |
+| `clients[].bssid` | string | BSSID the station was last seen with (`""` for a probe-only station) |
+| `clients[].associated` | boolean | Seen associated (assoc/data) and not kicked since |
+| `clients[].probed` | boolean | Sent at least one probe request |
+| `clients[].ssid` | string | Last probed SSID, JSON-escaped (`""` when none) |
+| `clients[].ssid_len` | integer | Probed SSID length in bytes |
+| `clients[].ssid_hex` | string | Probed SSID as lowercase hex — use this for binary SSIDs |
+| `clients[].rssi` | integer | Last antenna signal in dBm |
+| `clients[].has_rssi` | boolean | `rssi` is a real reading (a radiotap header without the antenna-signal field reports `0`/`false`) |
+| `clients[].frames` | integer | Frames observed from this station |
+| `clients[].age_ms` | integer | Milliseconds since the last observation |
+
+**Paging and size:** a response is capped at 6 stations for the same 8 KB
+reason as `GET_HANDSHAKES`. Stations are ordered newest observation first, so
+`offset: 0` always starts with the most recently active station.
+
+---
+
 #### `WIFI_SCAN` (Pwn4C extension)
 
 Surveys nearby access points from the monitor radio without touching the

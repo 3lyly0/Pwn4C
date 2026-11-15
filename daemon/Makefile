@@ -18,7 +18,7 @@
 # ── Source files ──────────────────────────────────────────────────────────── #
 SRCS := main.c util.c json_parse.c radio.c capture.c stream.c \
         discovery.c control.c mock.c wifi_scan.c wifi_sta.c beacon_parse.c \
-        eapol_parse.c handshake.c
+        eapol_parse.c handshake.c client_parse.c clients.c
 
 OBJS := $(SRCS:.c=.o)
 
@@ -83,17 +83,17 @@ cross: $(SRCS) pwn4cd.h
 # ── Unit tests ────────────────────────────────────────────────────────────── #
 TEST_SRCS := tests/test_json.c tests/test_stream_hdr.c \
              tests/test_hex_decode.c tests/test_bpf.c tests/test_beacon.c \
-             tests/test_wpa_psk.c tests/test_eapol.c
+             tests/test_wpa_psk.c tests/test_eapol.c tests/test_clients.c
 TEST_BIN  := tests/run_tests
 
 test: $(TEST_BIN)
 	@echo "[test] running unit tests..."
 	./$(TEST_BIN)
 
-$(TEST_BIN): $(TEST_SRCS) tests/run_tests.c json_parse.c util.c capture.c beacon_parse.c eapol_parse.c handshake.c
+$(TEST_BIN): $(TEST_SRCS) tests/run_tests.c json_parse.c util.c capture.c beacon_parse.c eapol_parse.c handshake.c client_parse.c clients.c
 	@mkdir -p tests
 	$(CC_NATIVE) $(CFLAGS_NATIVE) $(LDFLAGS_NATIVE) -DTEST_COMBINED -I. -o $@ \
-		$(TEST_SRCS) tests/run_tests.c json_parse.c util.c capture.c beacon_parse.c eapol_parse.c handshake.c
+		$(TEST_SRCS) tests/run_tests.c json_parse.c util.c capture.c beacon_parse.c eapol_parse.c handshake.c client_parse.c clients.c
 	@echo "[test] built: $@"
 
 # ── Clean ─────────────────────────────────────────────────────────────────── #

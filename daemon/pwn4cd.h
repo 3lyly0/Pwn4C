@@ -365,6 +365,59 @@ int     scan_run(daemon_t *d, int dwell_ms, char *out_json, size_t out_sz);
 int     scan_parse_beacon(const uint8_t *frame, size_t len,
                           int fallback_channel, scan_net_t *out);
 
+/*
+ * rt_info_t — RadioTap facts shared by every frame parser: where the 802.11
+ * header starts, and the antenna signal / frequency when the header carries
+ * them. has_signal distinguishes a real 0 dBm reading from "not present".
+ */
+typedef struct {
+    size_t rt_len;
+    int    signal_dbm;
+    bool   has_signal;
+    int    freq_mhz;
+} rt_info_t;
+
+int     scan_radiotap(const uint8_t *frame, size_t len, rt_info_t *out);
+
+/* ── Client inventory (probe/PNL + associated stations) ───────────────────── */
+#define CL_MAX_CLIENTS      32u     /* concurrent station slots             */
+#define CL_SSID_MAX         32u     /* longest probe SSID kept              */
+#define CL_JSON_PAGE        6u      /* stations per GET_CLIENTS page        */
+
+/*
+ * client_frame_t — one decoded station observation.
+ *
+ * `probe` carries the SSID the station is looking for (its PNL entry);
+ * `assoc`/`data` say it is talking to the BSSID; `left` says the AP just
+ * kicked it, so the association flag must be cleared.
+ */
+typedef struct {
+    uint8_t  sta[6];
+    uint8_t  bssid[6];
+    bool     has_bssid;
+    int      signal_dbm;
+    bool     has_signal;
+    bool     probe;
+    bool     assoc;
+    bool     data;
+    bool     left;
+    bool     has_ssid;
+    uint8_t  ssid[CL_SSID_MAX];
+    uint8_t  ssid_len;
+} client_frame_t;
+
+/* client_parse.c */
+int     client_parse_frame(const uint8_t *frame, size_t len,
+                          client_frame_t *out);
+
+/* clients.c */
+void        cl_reset(void);
+void        cl_observe(daemon_t *d, const uint8_t *frame, size_t len);
+void        cl_mock_inject(daemon_t *d);
+int         cl_tracked_count(void);
+/* Serialise up to CL_JSON_PAGE stations into a static buffer. */
+const char *cl_report(int offset, bool reset, int *total_out);
+
 /* ── EAPOL-Key capture (harvest) ──────────────────────────────────────────── */
 /* The 4-way handshake is tiny (95-byte body plus key data), so 256 bytes per
  * side is plenty even for M1 frames carrying a PMKID KDE and RSN IEs. */

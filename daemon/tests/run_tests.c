@@ -17,6 +17,7 @@ int run_bpf_tests(void);
 int run_beacon_tests(void);
 int run_wpa_psk_tests(void);
 int run_eapol_tests(void);
+int run_clients_tests(void);
 
 int main(void)
 {
@@ -39,6 +40,8 @@ int main(void)
     failures += run_wpa_psk_tests();
     printf("\n");
     failures += run_eapol_tests();
+    printf("\n");
+    failures += run_clients_tests();
 
     printf("\n==============================================\n");
     if (failures > 0) {

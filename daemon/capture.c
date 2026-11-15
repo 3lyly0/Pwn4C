@@ -507,6 +507,9 @@ int capture_read_frame(daemon_t *d)
         /* Feed one canned 4-way handshake through the real parser so the
          * harvest path is exercised end-to-end without a radio. */
         hs_mock_inject(d);
+        /* Same for the station inventory: a probing client and an
+         * associated one. */
+        cl_mock_inject(d);
         return 1;
     }
 
@@ -534,6 +537,10 @@ int capture_read_frame(daemon_t *d)
     /* Handshake harvesting sees every frame before it enters the ring, so a
      * full ring or a slow control client cannot hide an EAPOL exchange. */
     hs_observe(d, frame_buf, (size_t)n);
+
+    /* Station inventory: who is here, which AP they are on, what they probe
+     * for. Same reasoning — it must not depend on the ring. */
+    cl_observe(d, frame_buf, (size_t)n);
 
     ring_push_frame(d, frame_buf, (uint16_t)n);
     return 1;

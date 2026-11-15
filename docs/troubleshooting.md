@@ -573,6 +573,53 @@ that obeyed appears in the capture immediately.
 
 ---
 
+## `clients` Reports No Stations
+
+### Symptom
+
+`pwn4c clients` finishes its listen window and prints `[-] No stations heard.`
+
+### Causes and fixes
+
+**1. The drone is listening on an empty channel.** Probes and data frames only
+exist where clients are. Confirm the AP channel with `pwn4c networks` and pass
+`-c`, or use `pwn4c hop` to sweep while you watch.
+
+**2. The listen window is too short.** Phones probe in bursts, and an idle
+network may go minutes without a data frame. Try `--seconds 60`, or `--watch`
+to keep the table refreshing.
+
+**3. A BSSID frame filter is still installed.** `pwn4c clients` clears it, but a
+daemon left in a filtered state by another tool keeps dropping everything else.
+Start a fresh monitor session without `--filter-bssid` (`pwn4c monitor -c 6`) to
+reset the kernel filter.
+
+**4. Every station is associated to a different AP than the one you filtered
+on.** `--bssid` keeps only stations seen with that exact BSSID; a client that is
+probing has no BSSID at all, so it disappears. Drop the filter.
+
+**5. The table was cleared.** `START_MONITOR` resets the inventory. If you
+started a new monitor session, the previous stations are gone by design — the
+table only survives `STOP_MONITOR`.
+
+### Verification
+
+```bash
+# Inventory everything on the AP's channel, refreshing every two seconds
+pwn4c clients -c 6 --watch
+
+# Just the stations that are actually associated
+pwn4c clients -c 6 -s 30 --assoc-only
+
+# Machine-readable, one object per station
+pwn4c clients -c 6 -s 30 --json
+```
+
+`RSSI` shows `n/a` when the radiotap header carries no antenna-signal field
+(`has_rssi:false` in JSON). That is a property of the capture, not a failure.
+
+---
+
 ## Dropped Frames on High-Traffic Channels
 
 ### Symptom
