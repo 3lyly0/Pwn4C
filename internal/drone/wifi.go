@@ -16,6 +16,11 @@ type WirelessNetwork struct {
 	SignalDbm  int    `json:"signal_dbm"`
 	Hidden     bool   `json:"hidden"`
 	SSIDLength int    `json:"ssid_len,omitempty"`
+	WPS        bool   `json:"wps,omitempty"`
+	WPSState   int    `json:"wps_state,omitempty"`
+	WPSDPID    int    `json:"wps_dp_id,omitempty"`
+	WPSConfig  int    `json:"wps_config_methods,omitempty"`
+	WPSLocked  bool   `json:"wps_locked,omitempty"`
 }
 
 type scanResult struct {
@@ -36,9 +41,13 @@ type WifiLinkStatus struct {
 	IP         string `json:"ip"`
 	Channel    int    `json:"channel"`
 	Mode       string `json:"mode"`
+	Iface      string `json:"iface"`
 	State      string `json:"state"`
 	Error      string `json:"error"`
-	WPAState   string `json:"wpa_state"`
+	// ErrorDetail is the supplicant's TEMP-DISABLED reason: WRONG_KEY means
+	// the AP rejected the key, CONN_FAILED is an association/timeout problem.
+	ErrorDetail string `json:"error_detail"`
+	WPAState    string `json:"wpa_state"`
 	// Sharing is true when the drone NATs 192.168.4.0/24 behind the station
 	// link. Always false on firmware older than v1.4.0.
 	Sharing bool `json:"sharing"`
@@ -84,7 +93,15 @@ func (c *ControlClient) ScanNetworks(dwellMs int) ([]WirelessNetwork, error) {
 // LAN port reaches the internet. Association completes asynchronously — poll
 // WifiStatus afterwards.
 func (c *ControlClient) WifiConnect(ssid, password, bssid, encryption string, share bool) error {
-	resp, err := c.SendCommand("WIFI_CONNECT", wifiConnectParams(ssid, password, bssid, encryption, share))
+	return c.WifiConnectWithMAC(ssid, password, bssid, encryption, "", share)
+}
+
+// WifiConnectWithMAC is WifiConnect with an optional station MAC. The address
+// is written to the pwn4c_sta UCI profile so netifd applies it when the
+// netdev is created (an ioctl would race with vif creation).
+func (c *ControlClient) WifiConnectWithMAC(ssid, password, bssid, encryption, mac string, share bool) error {
+	resp, err := c.SendCommand("WIFI_CONNECT",
+		wifiConnectParams(ssid, password, bssid, encryption, mac, share))
 	if err != nil {
 		return err
 	}
@@ -93,7 +110,7 @@ func (c *ControlClient) WifiConnect(ssid, password, bssid, encryption string, sh
 
 // wifiConnectParams builds the WIFI_CONNECT payload. Split out so the wire
 // format can be asserted without a live drone.
-func wifiConnectParams(ssid, password, bssid, encryption string, share bool) map[string]interface{} {
+func wifiConnectParams(ssid, password, bssid, encryption, mac string, share bool) map[string]interface{} {
 	params := map[string]interface{}{
 		"ssid":  ssid,
 		"share": share,
@@ -106,6 +123,9 @@ func wifiConnectParams(ssid, password, bssid, encryption string, share bool) map
 	}
 	if encryption != "" {
 		params["encryption"] = encryption
+	}
+	if mac != "" {
+		params["mac"] = mac
 	}
 	return params
 }

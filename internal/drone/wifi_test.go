@@ -9,25 +9,28 @@ import (
 // to sharing when the key is absent, so omitting it would make --no-share a
 // no-op against newer firmware.
 func TestWifiConnectParams(t *testing.T) {
-	p := wifiConnectParams("TestNet", "", "", "", true)
+	p := wifiConnectParams("TestNet", "", "", "", "", true)
 	if p["ssid"] != "TestNet" {
 		t.Fatalf("ssid = %v", p["ssid"])
 	}
 	if p["share"] != true {
 		t.Fatalf("share = %v, want true", p["share"])
 	}
-	for _, absent := range []string{"psk", "bssid", "encryption"} {
+	for _, absent := range []string{"psk", "bssid", "encryption", "mac"} {
 		if _, ok := p[absent]; ok {
 			t.Fatalf("%s should be omitted when empty", absent)
 		}
 	}
 
-	p = wifiConnectParams("TestNet", "p@ssw0rd!", "aa:bb:cc:dd:ee:ff", "sae-mixed", false)
+	p = wifiConnectParams("TestNet", "p@ssw0rd!", "aa:bb:cc:dd:ee:ff", "sae-mixed", "02:11:22:33:44:55", false)
 	if p["share"] != false {
 		t.Fatalf("share = %v, want false", p["share"])
 	}
 	if p["psk"] != "p@ssw0rd!" || p["bssid"] != "aa:bb:cc:dd:ee:ff" || p["encryption"] != "sae-mixed" {
 		t.Fatalf("optional fields not forwarded: %+v", p)
+	}
+	if p["mac"] != "02:11:22:33:44:55" {
+		t.Fatalf("mac not forwarded: %+v", p)
 	}
 }
 

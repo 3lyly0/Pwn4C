@@ -14,6 +14,7 @@ var (
 	networksDwell  int
 	networksTarget string
 	networksJSON   bool
+	networksWPS    bool
 )
 
 var networksCmd = &cobra.Command{
@@ -45,10 +46,21 @@ recognize them later.`,
 			os.Exit(1)
 		}
 
+		if networksWPS {
+			filtered := nets[:0]
+			for _, n := range nets {
+				if n.WPS {
+					filtered = append(filtered, n)
+				}
+			}
+			nets = filtered
+		}
+
 		if networksJSON {
 			for _, n := range nets {
-				fmt.Printf("{\"ssid\":%q,\"bssid\":%q,\"channel\":%d,\"signal_dbm\":%d,\"hidden\":%t,\"ssid_len\":%d}\n",
-					n.SSID, n.BSSID, n.Channel, n.SignalDbm, n.Hidden, n.SSIDLength)
+				fmt.Printf("{\"ssid\":%q,\"bssid\":%q,\"channel\":%d,\"signal_dbm\":%d,\"hidden\":%t,\"ssid_len\":%d,\"wps\":%t,\"wps_state\":%d,\"wps_locked\":%t}\n",
+					n.SSID, n.BSSID, n.Channel, n.SignalDbm, n.Hidden,
+					n.SSIDLength, n.WPS, n.WPSState, n.WPSLocked)
 			}
 			return
 		}
@@ -67,8 +79,8 @@ recognize them later.`,
 func printNetworkTable(nets []drone.WirelessNetwork) {
 	fmt.Printf("\n[+] %d network(s) heard:\n\n", len(nets))
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "#\tSSID\tBSSID\tCH\tSIGNAL\tTYPE")
-	fmt.Fprintln(w, "-\t----\t-----\t--\t------\t----")
+	fmt.Fprintln(w, "#\tSSID\tBSSID\tCH\tSIGNAL\tWPS\tTYPE")
+	fmt.Fprintln(w, "-\t----\t-----\t--\t------\t---\t----")
 
 	for i, n := range nets {
 		ssid := n.SSID
@@ -85,8 +97,21 @@ func printNetworkTable(nets []drone.WirelessNetwork) {
 		if n.SignalDbm == 0 {
 			signal = "n/a"
 		}
-		fmt.Fprintf(w, "%d\t%s\t%s\t%d\t%s\t%s\n",
-			i+1, ssid, n.BSSID, n.Channel, signal, typ)
+		wps := "-"
+		if n.WPS {
+			switch {
+			case n.WPSLocked:
+				wps = "locked"
+			case n.WPSState == 1:
+				wps = "open"
+			case n.WPSState == 2:
+				wps = "configured"
+			default:
+				wps = "yes"
+			}
+		}
+		fmt.Fprintf(w, "%d\t%s\t%s\t%d\t%s\t%s\t%s\n",
+			i+1, ssid, n.BSSID, n.Channel, signal, wps, typ)
 	}
 	w.Flush()
 	fmt.Println()
@@ -122,5 +147,6 @@ func init() {
 	networksCmd.Flags().IntVarP(&networksDwell, "dwell", "d", 4000, "Survey duration per call in milliseconds (1000-15000)")
 	networksCmd.Flags().StringVarP(&networksTarget, "target", "t", "", "Target drone IP (defaults to auto-discovery)")
 	networksCmd.Flags().BoolVar(&networksJSON, "json", false, "Print one JSON object per network (machine readable)")
+	networksCmd.Flags().BoolVar(&networksWPS, "wps", false, "Show only APs advertising WPS")
 	rootCmd.AddCommand(networksCmd)
 }

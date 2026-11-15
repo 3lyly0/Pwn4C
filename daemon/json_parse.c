@@ -259,6 +259,34 @@ int json_get_int(const char *json, const char *key, int *out)
 }
 
 /*
+ * json_get_bool — Extract a boolean value for key into out.
+ *
+ * The wire protocol documents real JSON booleans (`"share": true`), which is
+ * what the Go CLI sends, but hand-written payloads and older clients used
+ * 1/0.  Accept both: `true`/`1` are true, `false`/`0` are false.  Returns 0
+ * on success and -1 when the key is absent or the token is not a boolean.
+ *
+ * Parsing booleans with json_get_int() silently failed on `true`/`false`,
+ * which is how `--mgmt-only` and `--no-share` ended up doing nothing.
+ */
+int json_get_bool(const char *json, const char *key, bool *out)
+{
+    const char *p;
+
+    if (!out) { return -1; }
+    *out = false;
+
+    p = find_key(json, key);
+    if (!p) { return -1; }
+
+    if (strncmp(p, "true", 4) == 0)  { *out = true;  return 0; }
+    if (strncmp(p, "false", 5) == 0) { *out = false; return 0; }
+    if (*p == '1') { *out = true;  return 0; }
+    if (*p == '0') { *out = false; return 0; }
+    return -1;
+}
+
+/*
  * json_field_exists — Returns 1 if the key exists, 0 otherwise.
  */
 int json_field_exists(const char *json, const char *key)

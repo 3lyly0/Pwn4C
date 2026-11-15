@@ -69,23 +69,39 @@ var configCmd = &cobra.Command{
 		applied := false
 
 		if cmd.Flags().Changed("mac") {
+			requested := configMAC
+			if requested == "random" {
+				requested = ""
+			}
 			fmt.Println("[+] Setting MAC address...")
-			newMAC, err := client.SetMAC(configMAC)
+			res, err := client.SetMACDetailed(requested)
 			if err != nil {
 				fmt.Printf("[!] Failed to set MAC: %v\n", err)
 				os.Exit(1)
 			}
-			fmt.Printf("[+] MAC updated to: %s\n", newMAC)
+			if res.RequestedMAC != "" && !res.Applied {
+				fmt.Printf("[!] Driver kept %s instead of %s\n",
+					res.MAC, res.RequestedMAC)
+			}
+			fmt.Printf("[+] MAC updated to: %s (persisted: %t)\n",
+				res.MAC, res.Persisted)
 			applied = true
 		}
 
 		if cmd.Flags().Changed("power") {
 			fmt.Printf("[+] Setting TX power to %d dBm...\n", configPower)
-			if err := client.SetTxPower(configPower); err != nil {
+			res, err := client.SetTxPowerDetailed(configPower)
+			if err != nil {
 				fmt.Printf("[!] Failed to set TX power: %v\n", err)
 				os.Exit(1)
 			}
-			fmt.Printf("[+] TX power set to %d dBm.\n", configPower)
+			if res.Clamped {
+				fmt.Printf("[+] TX power requested %d dBm; hardware applied %d dBm "+
+					"(PA/driver clamp, persisted).\n",
+					res.RequestedDbm, res.ActualDbm)
+			} else {
+				fmt.Printf("[+] TX power set to %d dBm (persisted).\n", res.ActualDbm)
+			}
 			applied = true
 		}
 
@@ -96,7 +112,8 @@ var configCmd = &cobra.Command{
 }
 
 func init() {
-	configCmd.Flags().StringVar(&configMAC, "mac", "", "MAC address to set (omit value or leave empty for random)")
+	configCmd.Flags().StringVar(&configMAC, "mac", "", "MAC address to set (use bare --mac for a random address)")
+	configCmd.Flags().Lookup("mac").NoOptDefVal = "random"
 	configCmd.Flags().IntVarP(&configPower, "power", "p", 20, "TX power in dBm (1-20)")
 	configCmd.Flags().BoolVar(&configRestore, "restore", false, "Exit monitor mode and restore normal Wi-Fi")
 	configCmd.Flags().BoolVar(&configReboot, "reboot", false, "Reboot the drone remotely")

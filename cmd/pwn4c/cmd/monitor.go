@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,6 +22,8 @@ var (
 	monitorHop         bool
 	monitorHopChannels string
 	monitorHopDwell    int
+	monitorSeconds     int
+	monitorPersist     bool
 )
 
 var monitorCmd = &cobra.Command{
@@ -85,7 +88,10 @@ Use -o - to stream raw PCAP bytes to stdout for live Wireshark analysis:
 
 		// 3. Command drone to start monitor mode
 		fmt.Fprintf(logOut, "[+] Starting monitor mode on channel %d...\n", monitorChannel)
-		if err := client.StartMonitor(monitorChannel); err != nil {
+		// With --seconds the daemon itself enforces the deadline: a dropped
+		// TCP session must not leave the radio capturing forever.
+		persist := monitorPersist || monitorSeconds > 0
+		if err := client.StartMonitorOpts(monitorChannel, persist, monitorSeconds); err != nil {
 			fmt.Fprintf(logOut, "[!] Drone rejected START_MONITOR: %v\n", err)
 			os.Exit(1)
 		}
@@ -126,21 +132,40 @@ Use -o - to stream raw PCAP bytes to stdout for live Wireshark analysis:
 
 		fmt.Fprintln(logOut, "[+] Monitor mode streaming active. Press Ctrl+C to stop.")
 
-		// Handle graceful termination
+		// Handle graceful termination, or a fixed --seconds deadline.
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
-		<-sigCh
+		if monitorSeconds > 0 {
+			fmt.Fprintf(logOut, "[*] Auto-stop after %d seconds.\n", monitorSeconds)
+			select {
+			case <-sigCh:
+			case <-time.After(time.Duration(monitorSeconds) * time.Second):
+				fmt.Fprintln(logOut, "\n[*] Monitor duration elapsed.")
+			}
+		} else {
+			<-sigCh
+		}
 		fmt.Fprintln(logOut, "\n[*] Stopping monitor session...")
 
 		if len(hopList) > 0 {
 			_ = client.StopHop()
 		}
-		_ = client.StopMonitor()
+		stopMonitorIfActive(client)
 		_ = receiver.Close()
 
 		fmt.Fprintf(logOut, "[+] Completed. Total frames captured: %d\n", frameCount)
 	},
+}
+
+// stopMonitorIfActive stops monitor mode, tolerating NOT_MONITORING: when a
+// capture ran with --seconds the daemon's own TTL may already have restored the
+// radio before the CLI gets here.
+func stopMonitorIfActive(client *drone.ControlClient) {
+	err := client.StopMonitor()
+	if err != nil && !strings.Contains(err.Error(), "NOT_MONITORING") {
+		fmt.Printf("[!] Warning: failed to stop monitor mode: %v\n", err)
+	}
 }
 
 func init() {
@@ -152,5 +177,7 @@ func init() {
 	monitorCmd.Flags().BoolVar(&monitorHop, "hop", false, "Enable autonomous drone-side channel hopping")
 	monitorCmd.Flags().StringVar(&monitorHopChannels, "channels", "1,6,11", "Comma-separated channels for --hop (e.g. 1,6,11)")
 	monitorCmd.Flags().IntVar(&monitorHopDwell, "dwell", 250, "Dwell time per channel in ms for --hop")
+	monitorCmd.Flags().IntVar(&monitorSeconds, "seconds", 0, "Stop capturing after N seconds (0 = until Ctrl+C)")
+	monitorCmd.Flags().BoolVar(&monitorPersist, "persist", false, "Keep the radio capturing if the control connection drops")
 	rootCmd.AddCommand(monitorCmd)
 }

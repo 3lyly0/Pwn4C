@@ -3,6 +3,71 @@
 All notable changes to Pwn4C are documented here. For releases prior to
 v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
 
+## [Unreleased]
+
+### Fixed
+- **Boolean parameters were ignored:** the Go CLI sends real JSON booleans
+  (`"mgmt_only": true`, `"share": false`), but the daemon parsed them with
+  `json_get_int()`, which rejects a `t`/`f` prefix. `monitor --mgmt-only` and
+  `connect --no-share` therefore did nothing on v1.4.0. A `json_get_bool()`
+  helper now accepts `true`/`false` and the legacy `1`/`0` spellings, and the
+  mock transcript exercises the boolean form end to end.
+- **Hardcoded interface names:** `pwn4cd` assumed `wlan0` / `phy0-sta0`, which
+  do not exist on OpenWrt 23.05 (`phy0-ap0` / `phy0-sta0`). The AP and station
+  netdevs are now detected at runtime (`iw dev`, `ifstatus`, UCI) and reported
+  in `GET_STATUS` as `ap_iface` / `sta_iface`; `--iface` still overrides.
+- **TX power lied:** `SET_TX_POWER` returned the requested value even when the
+  MT7628 PA clamped it. It now reads the power back from the driver, reports
+  `requested_dbm` / `clamped`, and persists the applied value to UCI.
+- **MAC changes were not durable:** `SET_MAC` bounced the radio even when it
+  was down, never persisted the address, and reported success unconditionally.
+  It now leaves a down radio down, writes `wireless.*.macaddr`, reads the
+  address back (`applied`), and refuses to run while monitor mode is active.
+- **Channel reporting:** `GET_STATUS.channel` was the daemon's cached value.
+  AP and STA channels are now read from the driver (`ap_channel`,
+  `sta_channel`), and `SET_CHANNEL` verifies the switch with `iw`.
+- **Injection frames never reached the air:** the frame builder emitted an
+  8-byte RadioTap header with an empty present bitmap. mt76 accepted the frame
+  and transmitted nothing. The builder now emits a 16-byte header with Flags,
+  Rate, Channel and TX flags.
+- **Silent TX drops above 64 frames:** the injection queue was 64 slots. It is
+  now 256 slots of 1024 bytes, paced by `interval_ms`, and `SEND_INJECTION`
+  reports `frames_requested` / `frames_queued` / `frames_sent` /
+  `frames_failed` / `frames_pending` so a shortfall is never hidden.
+- **BPF filter dropped client discovery:** a BSSID filter rejected undirected
+  probe requests (broadcast Addr1), which are the signal a deauth-and-listen
+  capture needs. Broadcast probe requests are now accepted; directed ones still
+  go through the address check. The management-only branch was also patched
+  incorrectly and could reject valid management frames.
+- **Monitor mode outlived its session (or died too early):** a client
+  disconnect always tore the radio down, and a stale capture vif made netifd
+  create `phy0-ap1`. `START_MONITOR` now accepts `persist` and `ttl_sec`, the
+  daemon enforces the deadline itself, and teardown deletes the vif. The CLI
+  gained `monitor --seconds` and `--persist`.
+- **Wrong passwords blamed for association failures:** `[TEMP-DISABLED]` was
+  treated as a bad key, but wpa_supplicant sets it for `reason=CONN_FAILED`
+  too. The daemon now parses the reason from `logread` and reports
+  `auth_failed` only for `WRONG_KEY`; other failures become `connect_failed`
+  with `error_detail`.
+- **`connect` could not pin a MAC or retry:** added `--mac`, `--random-mac`
+  and `--retry`. The station netdev is resolved dynamically, and
+  `share.sh on <iface>` masquerades on the real station interface.
+- **Shell input race:** the interactive shell mixed a `bufio.Scanner` with
+  direct `term.ReadPassword` reads, losing typed-ahead input, and recreated the
+  scanner on error. One buffered reader now backs every prompt. A listen
+  session also stops monitor mode when it ends, instead of leaving the radio
+  unavailable for the next command.
+
+### Added
+- `networks --wps` and WPS fields (`wps`, `wps_state`, `wps_dp_id`,
+  `wps_config_methods`, `wps_locked`) parsed from the WSC information element.
+- `deauth --rate`, `--reverse`, `--disassoc` and `--seconds`.
+- `config --mac` with no value now generates a random locally-administered
+  address; `config` and `status` print the applied/requested MAC, whether the
+  driver accepted it, and whether it was persisted.
+- `status` shows AP/STA channels and interfaces, radio MAC, TX power, monitor
+  persistence/TTL, and injection request/drop counters.
+
 ## [1.4.0] - 2026-10-26
 
 ### Added

@@ -30,9 +30,40 @@ type shellNet struct {
 type shellState struct {
 	client   *drone.ControlClient
 	target   string
-	in       *bufio.Scanner
+	in       *bufio.Reader
 	nets     []drone.WirelessNetwork
 	selected *shellNet
+}
+
+// readLine returns one input line without its terminator.
+//
+// A single bufio.Reader is shared by every prompt. The old code created a new
+// bufio.Scanner whenever it saw an error, which discarded whatever the scanner
+// had already buffered; the same buffered bytes also raced with the direct
+// term.ReadPassword read on the password prompt. One reader, one source of
+// truth.
+func (s *shellState) readLine() (string, error) {
+	line, err := s.in.ReadString('\n')
+	if err != nil && line == "" {
+		return "", err
+	}
+	return strings.TrimRight(line, "\r\n"), nil
+}
+
+// readPassword reads a secret line. If the shared reader still holds typed-ahead
+// input, that is consumed so nothing is lost; otherwise echo is disabled for
+// the duration of the read.
+func (s *shellState) readPassword() (string, error) {
+	if s.in.Buffered() > 0 {
+		return s.readLine()
+	}
+	raw, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Println()
+	if err != nil {
+		return "", err
+	}
+	// Never trim spaces: a WPA passphrase may legitimately contain them.
+	return strings.TrimRight(string(raw), "\r\n"), nil
 }
 
 var shellCmd = &cobra.Command{
@@ -57,7 +88,7 @@ Inside the menu, actions that need a network operate on the selected one
 		st := &shellState{
 			client: client,
 			target: target,
-			in:     bufio.NewScanner(os.Stdin),
+			in:     bufio.NewReader(os.Stdin),
 		}
 
 		status, err := client.GetStatus()
@@ -104,16 +135,13 @@ func (s *shellState) run() {
 		fmt.Println(" ══╗")
 		fmt.Print(shellMenu)
 		fmt.Print("pwn4c> ")
-		if !s.in.Scan() {
-			if s.in.Err() != nil {
-				s.in = bufio.NewScanner(os.Stdin)
-				fmt.Println()
-				continue
-			}
+		line, err := s.readLine()
+		if err != nil {
+			// Ctrl+D / closed stdin ends the session cleanly.
 			fmt.Println()
 			return
 		}
-		line := strings.TrimSpace(s.in.Text())
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
@@ -213,10 +241,11 @@ func (s *shellState) doUse(arg string) {
 	}
 	if arg == "" {
 		fmt.Print("[*] Network # or SSID (empty = cancel): ")
-		if !s.in.Scan() {
+		typed, err := s.readLine()
+		if err != nil {
 			return
 		}
-		arg = strings.TrimSpace(s.in.Text())
+		arg = strings.TrimSpace(typed)
 		if arg == "" {
 			return
 		}
@@ -255,10 +284,11 @@ func (s *shellState) askYN(prompt string, defYes bool) bool {
 		suffix = " [y/N]: "
 	}
 	fmt.Print(prompt + suffix)
-	if !s.in.Scan() {
+	ans, err := s.readLine()
+	if err != nil {
 		return false
 	}
-	ans := strings.ToLower(strings.TrimSpace(s.in.Text()))
+	ans = strings.ToLower(strings.TrimSpace(ans))
 	if ans == "" {
 		return defYes
 	}
@@ -271,10 +301,11 @@ func (s *shellState) doConnect() {
 		ssid = s.selected.ssid
 	}
 	fmt.Print("[*] SSID to join (empty = selected network): ")
-	if !s.in.Scan() {
+	typed, err := s.readLine()
+	if err != nil {
 		return
 	}
-	typed := strings.TrimSpace(s.in.Text())
+	typed = strings.TrimSpace(typed)
 	if typed != "" {
 		ssid = typed
 	}
@@ -285,13 +316,11 @@ func (s *shellState) doConnect() {
 	hidden := s.selected != nil && (s.selected.hidden || s.selected.ssid == "") && typed == ""
 
 	fmt.Print("[*] Password (hidden input; empty = open network): ")
-	raw, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println()
+	password, err := s.readPassword()
 	if err != nil {
 		fmt.Printf("[!] %v\n", err)
 		return
 	}
-	password := strings.TrimSpace(string(raw))
 
 	if hidden {
 		fmt.Printf("[*] '%s' is not visible in the air — the drone will scan for it by name.\n", ssid)
@@ -359,10 +388,11 @@ func (s *shellState) doListen(deauth bool) {
 	} else {
 		fmt.Printf("[*] No network selected — listening on channel %d without a BSSID filter.\n", channel)
 		fmt.Print("[*] Channel to listen on (empty = 6): ")
-		if !s.in.Scan() {
+		v, err := s.readLine()
+		if err != nil {
 			return
 		}
-		if v := strings.TrimSpace(s.in.Text()); v != "" {
+		if v = strings.TrimSpace(v); v != "" {
 			if ch, err := strconv.Atoi(v); err == nil && ch >= 1 && ch <= 13 {
 				channel = ch
 			} else {
@@ -381,10 +411,11 @@ func (s *shellState) doListen(deauth bool) {
 		defName = "handshake.pcap"
 	}
 	fmt.Printf("[*] Output PCAP (empty = %s): ", defName)
-	if !s.in.Scan() {
+	typed, err := s.readLine()
+	if err != nil {
 		return
 	}
-	outPath := strings.TrimSpace(s.in.Text())
+	outPath := strings.TrimSpace(typed)
 	if outPath == "" {
 		outPath = defName
 	}
@@ -392,10 +423,11 @@ func (s *shellState) doListen(deauth bool) {
 	if deauth {
 		count := 25
 		fmt.Printf("[*] Deauth frame count (empty = %d): ", count)
-		if !s.in.Scan() {
+		v, err := s.readLine()
+		if err != nil {
 			return
 		}
-		if v := strings.TrimSpace(s.in.Text()); v != "" {
+		if v = strings.TrimSpace(v); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 256 {
 				count = n
 			}
@@ -403,10 +435,11 @@ func (s *shellState) doListen(deauth bool) {
 
 		clientMAC := "ff:ff:ff:ff:ff:ff"
 		fmt.Print("[*] Target client MAC (empty = broadcast, usually ignored): ")
-		if !s.in.Scan() {
+		v, err = s.readLine()
+		if err != nil {
 			return
 		}
-		if v := strings.TrimSpace(s.in.Text()); v != "" {
+		if v = strings.TrimSpace(v); v != "" {
 			if hw, err := net.ParseMAC(v); err != nil || len(hw) != 6 {
 				fmt.Println("[!] Invalid client MAC — aborting.")
 				return
@@ -421,16 +454,20 @@ func (s *shellState) doListen(deauth bool) {
 			fmt.Println("[!] Broadcast deauth is ignored by most clients, so the capture")
 			fmt.Println("    will probably contain no handshake. Prefer the client MAC.")
 			fmt.Print("[*] Continue with broadcast anyway? [y/N]: ")
-			if !s.in.Scan() {
+			v, err = s.readLine()
+			if err != nil {
 				return
 			}
-			if !strings.EqualFold(strings.TrimSpace(s.in.Text()), "y") {
+			if !strings.EqualFold(strings.TrimSpace(v), "y") {
 				fmt.Println("[-] Cancelled.")
 				return
 			}
 		}
 
-		frameHex, err := drone.BuildDeauthFrame(bssid, clientMAC, drone.ReasonClass3FromNonAssocSTA)
+		opts := drone.DefaultFrameOptions()
+		opts.Channel = channel
+		frameHex, err := drone.BuildManagementFrame(bssid, clientMAC,
+			drone.ReasonClass3FromNonAssocSTA, opts)
 		if err != nil {
 			fmt.Printf("[!] %v\n", err)
 			return
@@ -460,23 +497,27 @@ func (s *shellState) doListen(deauth bool) {
 		receiver, frames := s.startReceiver(outPath)
 		fmt.Printf("[+] Injecting %d deauth frames against %s...\n", count, bssid)
 		txBefore, txBeforeOK := readInjectFrames(s.client)
-		sent, queued, failed, err := s.client.SendInjection(frameHex, count, 10)
+		res, err := s.client.InjectFrame(frameHex, count, 10, 0)
 		if err != nil {
 			receiver.Close()
 			fmt.Printf("[!] Injection failed: %v\n", err)
 			return
 		}
-		fmt.Printf("[+] Injection queued: %d frame(s) (accepted synchronously: %d, failed: %d)\n",
-			queued, sent, failed)
-		if queued > 0 {
-			if err := waitForTxDrain(s.client, 5*time.Second); err != nil {
+		fmt.Printf("[+] Injection queued: %d frame(s) (accepted synchronously: %d, dropped: %d, pending: %d)\n",
+			res.Queued, res.Sent, res.Failed, res.Pending)
+		if res.Failed > 0 {
+			fmt.Printf("[!] %d frame(s) were dropped by the drone TX ring (max %d).\n",
+				res.Failed, res.QueueMax)
+		}
+		if res.Pending > 0 {
+			if err := waitForTxDrain(s.client, 10*time.Second); err != nil {
 				receiver.Close()
 				fmt.Printf("[!] Lost contact with the drone during TX: %v\n", err)
 				fmt.Println("    It may have reset — run `pwn4c discover` and check its uptime.")
 				return
 			}
 		}
-		reportTxDelta(s.client, txBefore, txBeforeOK, sent+queued)
+		reportTxDelta(s.client, txBefore, txBeforeOK, res.Sent+res.Pending)
 		fmt.Println("[+] Deauth sent — listening for reconnections and handshakes.")
 		fmt.Printf("    Capturing %s -> %s\n", label, outPath)
 		fmt.Println("    Press Ctrl+C to stop.")
@@ -486,6 +527,7 @@ func (s *shellState) doListen(deauth bool) {
 		fmt.Println("\n[*] Stopping capture...")
 		receiver.Close()
 		_ = s.client.SetFilter(false, "")
+		s.stopMonitorQuietly()
 		fmt.Printf("[+] Capture saved: %s\n", outPath)
 		reportCapture(frames.Load())
 		fmt.Println("    wireshark -r " + outPath + "   (filter: eapol || wlan.fc.type_subtype == 0x0c)")
@@ -518,8 +560,19 @@ func (s *shellState) doListen(deauth bool) {
 
 	fmt.Println("\n[*] Stopping capture...")
 	receiver.Close()
+	_ = s.client.SetFilter(false, "")
+	s.stopMonitorQuietly()
 	fmt.Printf("[+] Capture saved: %s\n", outPath)
 	reportCapture(frames.Load())
+}
+
+// stopMonitorQuietly restores the radio after a listen session. Leaving monitor
+// mode on would keep the single radio unavailable for 'connect'/'wifi', and a
+// stale capture vif makes netifd create phy0-ap1 on the next restart.
+func (s *shellState) stopMonitorQuietly() {
+	if err := s.client.StopMonitor(); err != nil {
+		fmt.Printf("[!] Warning: failed to stop monitor mode: %v\n", err)
+	}
 }
 
 // reportCapture flags a capture window that produced no frames at all. A live
@@ -597,10 +650,11 @@ func (s *shellState) doHop(arg string) {
 func (s *shellState) doPower(arg string) {
 	if arg == "" {
 		fmt.Print("[*] TX power in dBm (1-20, empty = cancel): ")
-		if !s.in.Scan() {
+		v, err := s.readLine()
+		if err != nil {
 			return
 		}
-		arg = strings.TrimSpace(s.in.Text())
+		arg = strings.TrimSpace(v)
 		if arg == "" {
 			return
 		}

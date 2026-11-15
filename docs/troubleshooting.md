@@ -734,10 +734,14 @@ ssh root@192.168.4.1 \
 ssh root@192.168.4.1 "ubus call wpa_supplicant phy_status '{\"phy\":\"phy0\"}'"
 ```
 
-`wpa_state=COMPLETED` means the 4-way handshake succeeded; a network flagged
-`[TEMP-DISABLED]` means the AP rejected the key. `WIFI_STATUS` reads the same
-sources (falling back to ubus, then `iw`) and only reports `connected` after
-`COMPLETED` plus a DHCP lease.
+`wpa_state=COMPLETED` means the 4-way handshake succeeded. A network flagged
+`[TEMP-DISABLED]` means the supplicant gave up — it is set both for a rejected
+key (`reason=WRONG_KEY`) and for ordinary association failures
+(`reason=CONN_FAILED`), so it is not proof of a bad password. The daemon reads
+the `reason=` field from `logread` and reports `auth_failed` only for
+`WRONG_KEY`; anything else becomes `connect_failed` with `error_detail`.
+`WIFI_STATUS` reads the same sources (falling back to ubus, then `iw`) and only
+reports `connected` after `COMPLETED` plus a DHCP lease.
 
 ### `pwn4c connect` joins but no IP is assigned
 
@@ -765,7 +769,8 @@ dropped. The image ships without `firewall4`, so sharing is a single nftables
 table rather than a firewall zone:
 
 ```bash
-ssh root@192.168.4.1 "/usr/lib/pwn4c/share.sh on; /usr/lib/pwn4c/share.sh status"
+# The optional argument is the station netdev (phy0-sta0 on 23.05, wlan0 on older images)
+ssh root@192.168.4.1 "/usr/lib/pwn4c/share.sh on phy0-sta0; /usr/lib/pwn4c/share.sh status"
 ssh root@192.168.4.1 "nft list table ip pwn4c_share; sysctl net.ipv4.ip_forward"
 ```
 

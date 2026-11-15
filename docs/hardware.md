@@ -132,7 +132,7 @@ The primary constraint is flash storage, not RAM. `pwn4cd` uses a fixed 512 KB r
 
 ### Monitor Mode Behavior
 
-When `pwn4cd` places the radio in monitor mode via `iw dev wlan0 set monitor none`:
+When `pwn4cd` places the radio in monitor mode (via `iw dev <netdev> set monitor none`, where the netdev is resolved at runtime — `phy0-ap0` on OpenWrt 23.05, `wlan0` on older images):
 
 1. The interface detaches from all BSS associations.
 2. The driver disables hardware frame filtering: all received 802.11 frames (management, control, data) are delivered to user-space.
@@ -145,12 +145,13 @@ The `mt76` driver is the mainline Linux driver for MediaTek MT76x0/MT76x2 radios
 
 **Frame Injection:**
 - Injection is performed by writing raw 802.11 frames (with RadioTap header) to a raw packet socket bound to the monitor interface.
+- The RadioTap header must carry Flags, Rate, Channel and TX flags (16 bytes). An 8-byte header with an empty present bitmap is accepted by the driver but the frame never reaches the air.
 - The driver respects RadioTap TX flags: data rate, channel, and `IEEE80211_RADIOTAP_F_TX_NOACK` (suppress ACK expectation).
 - Injection timing is non-deterministic. The frame enters the hardware TX queue and transmits at the next DIFS/SIFS boundary. Typical latency from `sendto()` to on-air: 200-800 us under low contention.
-- Back-to-back injection (e.g., deauthentication floods) can saturate the TX queue. The driver returns `ENOBUFS` when full. `pwn4cd` handles this by sleeping 1 ms and retrying up to 10 times before reporting failure.
+- Back-to-back injection (e.g., deauthentication floods) can saturate the TX queue. The driver returns `ENOBUFS` when full. `pwn4cd` paces frames through a 256-slot queue and retries with a bounded deadline; a shortfall is reported as `frames_failed`, never silently dropped.
 
 **Channel Switching:**
-- Channel changes via `iw dev wlan0 set channel <N>` complete in ~5 ms on the MT7628N.
+- Channel changes via `iw dev <netdev> set channel <N>` complete in ~5 ms on the MT7628N.
 - During a switch, the RX path halts briefly. Expect a 5-15 ms gap in the capture stream. The Host should account for this when correlating timestamps.
 
 **Known Limitations:**

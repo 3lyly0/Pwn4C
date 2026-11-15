@@ -76,6 +76,9 @@ static uint32_t eval_cbpf(const struct sock_filter *insns, unsigned short len,
         case (BPF_JMP | BPF_JEQ | BPF_K):
             pc = (unsigned short)(pc + ((A == k) ? f->jt : f->jf));
             break;
+        case (BPF_JMP | BPF_JA):
+            pc = (unsigned short)(pc + k);
+            break;
         case (BPF_RET | BPF_K):
             return k;
         default:
@@ -106,12 +109,13 @@ static void test_bssid_filter(void)
     const uint8_t bssid[6]  = {0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff};
     const uint8_t client[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
     const uint8_t other[6]  = {0x66, 0x66, 0x66, 0x66, 0x66, 0x66};
-    struct sock_filter insns[32];
+    const uint8_t bcast[6]  = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    struct sock_filter insns[64];
     unsigned short prog_len = 0;
     uint8_t buf[512];
     size_t  flen;
 
-    if (capture_build_bpf(false, bssid, insns, 32, &prog_len) < 0 || prog_len == 0) {
+    if (capture_build_bpf(false, bssid, insns, 64, &prog_len) < 0 || prog_len == 0) {
         FAIL("build bssid filter", "capture_build_bpf failed");
         return;
     }
@@ -124,6 +128,16 @@ static void test_bssid_filter(void)
 
     build_frame(buf, 24, 0x80, 0x00, other, client, bssid, &flen);
     CHECK("bssid addr3 (mgmt)", eval_cbpf(insns, prog_len, buf, flen) > 0);
+
+    /* Undirected probe requests carry a broadcast Addr1/Addr3 and are the
+     * client-discovery signal a BSSID-filtered capture must keep. */
+    build_frame(buf, 24, 0x40, 0x00, bcast, client, bcast, &flen);
+    CHECK("broadcast probe request kept",
+          eval_cbpf(insns, prog_len, buf, flen) > 0);
+
+    build_frame(buf, 24, 0x40, 0x00, other, client, bcast, &flen);
+    CHECK("directed probe request dropped",
+          eval_cbpf(insns, prog_len, buf, flen) == 0);
 
     build_frame(buf, 24, 0x08, 0x01, other, client, other, &flen);
     CHECK("bssid mismatch dropped", eval_cbpf(insns, prog_len, buf, flen) == 0);
@@ -138,12 +152,12 @@ static void test_mgmt_and_bssid_filter(void)
     const uint8_t bssid[6]  = {0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff};
     const uint8_t client[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
     const uint8_t other[6]  = {0x66, 0x66, 0x66, 0x66, 0x66, 0x66};
-    struct sock_filter insns[32];
+    struct sock_filter insns[64];
     unsigned short prog_len = 0;
     uint8_t buf[512];
     size_t  flen;
 
-    if (capture_build_bpf(true, bssid, insns, 32, &prog_len) < 0 || prog_len == 0) {
+    if (capture_build_bpf(true, bssid, insns, 64, &prog_len) < 0 || prog_len == 0) {
         FAIL("build mgmt+bssid filter", "capture_build_bpf failed");
         return;
     }
@@ -162,12 +176,12 @@ static void test_mgmt_only_filter(void)
 {
     const uint8_t client[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
     const uint8_t other[6]  = {0x66, 0x66, 0x66, 0x66, 0x66, 0x66};
-    struct sock_filter insns[32];
+    struct sock_filter insns[64];
     unsigned short prog_len = 0;
     uint8_t buf[512];
     size_t  flen;
 
-    if (capture_build_bpf(true, NULL, insns, 32, &prog_len) < 0 || prog_len == 0) {
+    if (capture_build_bpf(true, NULL, insns, 64, &prog_len) < 0 || prog_len == 0) {
         FAIL("build mgmt-only filter", "capture_build_bpf failed");
         return;
     }

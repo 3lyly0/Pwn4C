@@ -21,8 +21,8 @@ Pwn4C converts a stock Xiaomi Mi Router 4C (MediaTek MT7628N, ~$15 USD) into a h
 - **Autonomous Daemon-Side Channel Hopping (`pwn4c hop` / `pwn4c monitor --hop`)**: Sweeps across 2.4 GHz channels (1–13) directly inside the C daemon's `select()` timer loop using native `nl80211` Generic Netlink (`<2ms` switch latency) with zero TCP polling overhead.
 - **Kernel Classic BPF Frame Filtering (`--mgmt-only`, `--filter-bssid`)**: Attaches classic BPF bytecode (`SO_ATTACH_FILTER`) to the `AF_PACKET` socket in kernel space, filtering Management frames or target BSSIDs across Addr1/Addr2/Addr3 (preserving Data and WPA/EAPOL handshakes).
 - **Live Wireshark Pipe Streaming (`pwn4c monitor -o -`)**: Streams standard `DLT_IEEE802_11_RADIO` PCAP records directly to `stdout` for real-time inspection in Wireshark (`pwn4c monitor -c 6 -o - | wireshark -k -i -`).
-- **Active 802.11 Frame Injection & Deauth (`pwn4c deauth`)**: Enqueues raw 802.11 management frames into a 64-slot non-blocking TX ring buffer with configurable inter-frame pacing (`--interval`).
-- **Hardware-Level RF Control & Self-Healing (`pwn4c config`, `pwn4c status`)**: Direct `nl80211` and POSIX `ioctl` control over transmission power (1–20 dBm), dynamic MAC spoofing/randomization, automatic interface recovery on `ENETDOWN`/`ENODEV`, and full drop telemetry (`rx_frames`, `inject_frames`, `ring_overruns`, `kernel_drops`, `iface_recoveries`).
+- **Active 802.11 Frame Injection & Deauth (`pwn4c deauth`)**: Enqueues raw 802.11 management frames into a 256-slot non-blocking TX ring buffer with configurable inter-frame pacing (`--interval`), full RadioTap TX metadata (rate/channel), and `--reverse` / `--disassoc` variants. Every burst reports requested / queued / sent / failed / pending frames, so a shortfall is never hidden.
+- **Hardware-Level RF Control & Self-Healing (`pwn4c config`, `pwn4c status`)**: Direct `nl80211` and POSIX `ioctl` control over transmission power (1–20 dBm) and dynamic MAC spoofing/randomization; changes are read back from the driver and persisted to UCI, so the CLI reports what the hardware actually applied. Automatic interface recovery on `ENETDOWN`/`ENODEV`, runtime netdev detection (`phy0-ap0` on OpenWrt 23.05, `wlan0` on older images), and full drop telemetry (`rx_frames`, `inject_frames`, `ring_overruns`, `kernel_drops`, `iface_recoveries`).
 - **Wi-Fi Survey & Station Mode (`pwn4c networks`, `pwn4c connect`)**: The drone sweeps the 2.4 GHz band from monitor mode and reports every AP — hidden networks included, with their advertised SSID length — then can join an upstream network as a station (hidden SSIDs supported) without ever touching the stock AP profile. By default it also NATs `192.168.4.0/24` behind that link, so a host plugged into a LAN port gets internet through the drone's Wi-Fi.
 - **Verified OTA Firmware Updates (`pwn4c upgrade`)**: Push a sysupgrade image from the host over the control channel; the drone verifies size and SHA-256 before flashing and comes back online on the new firmware.
 - **Interactive Shell (`pwn4c shell`)**: One persistent control session with a numbered menu — survey, select, join, listen, deauth-then-capture — instead of chains of separate commands and reconnects.
@@ -36,12 +36,12 @@ Pwn4C converts a stock Xiaomi Mi Router 4C (MediaTek MT7628N, ~$15 USD) into a h
 | `infect` | `pwn4c infect 192.168.31.1 -f sysupgrade.bin` | Exploits stock Xiaomi firmware and directly flashes Pwn4C OS (air-gapped) |
 | `discover` | `pwn4c discover [-t 3] [--wait-timeout 0]` | Scans subnet for active Pwn4C drone implants via UDP broadcast (keeps retrying by default) |
 | `status` | `pwn4c status [target_ip] [--psk secret]` | Queries live telemetry, drop counters, and radio state over TCP |
-| `monitor` | `pwn4c monitor [target_ip] -c 6 -o capture.pcap [--hop]` | Starts 802.11 monitor mode, optional BPF filter/hopper, and streams PCAP |
+| `monitor` | `pwn4c monitor [target_ip] -c 6 -o capture.pcap [--hop] [--seconds 60] [--persist]` | Starts 802.11 monitor mode, optional BPF filter/hopper, and streams PCAP |
 | `hop` | `pwn4c hop [target_ip] -d 250 -c 1,6,11` | Starts autonomous drone-side channel hopping across specified channels |
-| `deauth` | `pwn4c deauth [target_ip] -b <bssid> [-c <client>] [--monitor -o hs.pcap]` | Injects raw IEEE 802.11 deauthentication frames; `--monitor` captures the handshake in the same session |
-| `config` | `pwn4c config [target_ip] --power 20 --mac random` | Adjusts TX power, randomizes/spoofs MAC, or restores normal mode |
-| `networks` | `pwn4c networks [-d 4000] [--json]` | Surveys nearby APs from the monitor radio (hidden SSIDs shown with their length) |
-| `connect` | `pwn4c connect <ssid> [-p pass] [--no-share]` | Joins the drone to an upstream Wi-Fi network and NATs its LAN behind the link (station mode, hidden SSIDs OK) |
+| `deauth` | `pwn4c deauth [target_ip] -b <bssid> [-c <client>] [--rate 5.5] [--reverse] [--disassoc] [--monitor -o hs.pcap]` | Injects raw IEEE 802.11 deauth/disassoc frames; `--monitor` captures the handshake in the same session |
+| `config` | `pwn4c config [target_ip] --power 20 --mac` | Adjusts TX power, randomizes/spoofs MAC, or restores normal mode |
+| `networks` | `pwn4c networks [-d 4000] [--wps] [--json]` | Surveys nearby APs from the monitor radio (hidden SSIDs shown with their length, WPS flags reported) |
+| `connect` | `pwn4c connect <ssid> [-p pass] [--mac <addr>] [--random-mac] [--retry 2] [--no-share]` | Joins the drone to an upstream Wi-Fi network and NATs its LAN behind the link (station mode, hidden SSIDs OK) |
 | `wifi-status` | `pwn4c wifi-status` | Shows the drone's upstream station link (SSID/BSSID/channel/IP) |
 | `wifi-disconnect` | `pwn4c wifi-disconnect` | Leaves the upstream network; radio returns to the idle state |
 | `upgrade` | `pwn4c upgrade --image sysupgrade.bin` | Verified OTA firmware update (SHA-256 checked, waits for the reboot) |
@@ -113,8 +113,8 @@ pwn4c deauth -b AA:BB:CC:DD:EE:FF -c 12:22:33:44:55:66 -i 6 --monitor --filter-b
 # Inject 20 deauth frames against target AP client with 10ms pacing
 pwn4c deauth -b AA:BB:CC:DD:EE:FF -c 12:22:33:44:55:66 -i 6 -n 20 --interval 10
 
-# Maximize TX power and randomize drone MAC
-pwn4c config --power 20 --mac random
+# Maximize TX power and randomize drone MAC (bare --mac = random)
+pwn4c config --power 20 --mac
 ```
 
 ### 6. Wi-Fi Management (survey, join, update)

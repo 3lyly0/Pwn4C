@@ -242,6 +242,9 @@ void ctrl_teardown_monitor(daemon_t *d)
     if (d->state != STATE_MONITORING && d->state != STATE_INJECTING
         && d->radio_mode != RADIO_MONITOR) { return; }
 
+    d->monitor_persist     = false;
+    d->monitor_ttl_sec     = 0;
+    d->monitor_deadline_ms = 0;
     d->hop_enabled = false;
     if (!d->mock_mode) {
         util_trace("teardown", "start tx_queue=%d", d->tx_q.count);
@@ -326,14 +329,41 @@ static void cmd_auth(daemon_t *d, const char *id, const char *params)
 
 /* ── Command handlers ─────────────────────────────────────────────────────── */
 
+/*
+ * iface_channel_now — Operating channel of one netdev (0 when unknown).
+ */
+static int iface_channel_now(const char *iface)
+{
+    char cmd[80];
+    char out[512];
+    const char *p;
+
+    if (!iface || iface[0] == '\0') { return 0; }
+    (void)snprintf(cmd, sizeof(cmd), "iw dev %s info 2>/dev/null", iface);
+    if (util_run_cmd_capture(cmd, out, sizeof(out), IW_TIMEOUT_SECS) != 0) {
+        return 0;
+    }
+    p = strstr(out, "channel ");
+    return p ? atoi(p + strlen("channel ")) : 0;
+}
+
 static void cmd_get_status(daemon_t *d, const char *id)
 {
-    char     data[896];
+    char     data[1400];
     char     drone_id[32];
+    char     mac_str[18] = "";
+    char     ap_iface[16];
+    char     sta_iface[16];
+    uint8_t  mac[6];
     int      cpu_temp = 0;
+    int      tx_power = 0;
+    int      sta_channel = 0;
     int64_t  free_ram = 0;
     int      uptime;
     uint32_t kernel_drops = 0;
+    bool     monitor = (d->state == STATE_MONITORING
+                     || d->state == STATE_INJECTING
+                     || d->radio_mode == RADIO_MONITOR);
 
     (void)snprintf(drone_id, sizeof(drone_id), "pwn4c-%02x%02x",
                    d->base_mac[4], d->base_mac[5]);
@@ -343,11 +373,29 @@ static void cmd_get_status(daemon_t *d, const char *id)
     uptime = (int)(util_monotonic_sec() - d->start_sec);
     (void)capture_get_kernel_drops(d, &kernel_drops);
 
+    if (radio_read_mac(d, mac) == 0) {
+        util_mac_to_str(mac, mac_str, sizeof(mac_str));
+    }
+    if (radio_get_txpower(d, &tx_power) != 0) {
+        tx_power = d->tx_power_dbm;
+    }
+    (void)snprintf(ap_iface, sizeof(ap_iface), "%s", d->wlan_iface);
+    (void)snprintf(sta_iface, sizeof(sta_iface), "%s", radio_sta_netdev(d));
+    sta_channel = iface_channel_now(sta_iface);
+
     (void)snprintf(data, sizeof(data),
         "{"
         "\"state\":\"%s\","
         "\"channel\":%d,"
+        "\"ap_channel\":%d,"
+        "\"sta_channel\":%d,"
+        "\"ap_iface\":\"%s\","
+        "\"sta_iface\":\"%s\","
+        "\"mac\":\"%s\","
+        "\"tx_power_dbm\":%d,"
         "\"monitor_active\":%s,"
+        "\"monitor_persist\":%s,"
+        "\"monitor_ttl_sec\":%d,"
         "\"tx_queue_depth\":%d,"
         "\"tx_queue_max\":%u,"
         "\"uptime_seconds\":%d,"
@@ -358,16 +406,24 @@ static void cmd_get_status(daemon_t *d, const char *id)
         "\"rx_frames\":%llu,"
         "\"tx_frames\":%llu,"
         "\"inject_frames\":%llu,"
+        "\"inject_requested\":%llu,"
+        "\"inject_dropped\":%llu,"
         "\"ring_overruns\":%llu,"
         "\"inject_failures\":%llu,"
         "\"kernel_drops\":%lu,"
         "\"iface_recoveries\":%llu"
         "}",
-        d->state == STATE_MONITORING || d->state == STATE_INJECTING
-            ? "monitor" : "idle",
+        monitor ? "monitor" : "idle",
         d->channel,
-        (d->state == STATE_MONITORING || d->state == STATE_INJECTING)
-            ? "true" : "false",
+        iface_channel_now(ap_iface),
+        sta_channel,
+        ap_iface,
+        sta_iface,
+        mac_str,
+        tx_power,
+        monitor ? "true" : "false",
+        d->monitor_persist ? "true" : "false",
+        d->monitor_ttl_sec,
         (int)d->tx_q.count,
         TX_QUEUE_MAX,
         uptime,
@@ -378,6 +434,8 @@ static void cmd_get_status(daemon_t *d, const char *id)
         (unsigned long long)d->frames_captured,
         (unsigned long long)d->stream_seq,
         (unsigned long long)d->inject_frames,
+        (unsigned long long)d->inject_requested,
+        (unsigned long long)d->inject_dropped,
         (unsigned long long)d->ring_overruns,
         (unsigned long long)d->inject_failures,
         (unsigned long)kernel_drops,
@@ -389,8 +447,10 @@ static void cmd_get_status(daemon_t *d, const char *id)
 static void cmd_start_monitor(daemon_t *d, const char *id, const char *params)
 {
     int  channel = 1;
+    bool persist = false;
+    int  ttl_sec = 0;
     char ht_mode[16];
-    char data[128];
+    char data[256];
     char stream_target[48];
 
     if (d->state == STATE_MONITORING || d->state == STATE_INJECTING) {
@@ -447,21 +507,35 @@ static void cmd_start_monitor(daemon_t *d, const char *id, const char *params)
     d->frames_dropped  = 0;
     d->stream_seq      = 0;
 
+    /*
+     * Session lifetime.  `persist` keeps the radio capturing after this
+     * control client goes away (useful for a detached listen); `ttl_sec`
+     * guarantees the radio is restored even if nobody ever reconnects.
+     */
+    (void)json_get_bool(params, "persist", &persist);
+    (void)json_get_int(params, "ttl_sec", &ttl_sec);
+    d->monitor_persist = persist;
+    if (ttl_sec < 0) { ttl_sec = 0; }
+    if (ttl_sec > 86400) { ttl_sec = 86400; }
+    d->monitor_ttl_sec = ttl_sec;
+    d->monitor_deadline_ms = (ttl_sec > 0)
+        ? util_monotonic_ms() + (int64_t)ttl_sec * 1000LL : 0;
+
     /* Apply BPF frame filter if requested in start params (§3.4) */
     {
-        int mgmt_only = 0;
+        bool mgmt_only = false;
         char bssid_str[32];
         uint8_t bssid[6];
         bool has_bssid = false;
 
-        (void)json_get_int(params, "mgmt_only", &mgmt_only);
+        (void)json_get_bool(params, "mgmt_only", &mgmt_only);
         if (json_get_str(params, "bssid", bssid_str, sizeof(bssid_str)) == 0) {
             if (util_parse_mac(bssid_str, bssid) == 0) {
                 has_bssid = true;
             }
         }
         if (mgmt_only || has_bssid) {
-            (void)capture_set_filter(d, mgmt_only != 0, has_bssid ? bssid : NULL);
+            (void)capture_set_filter(d, mgmt_only, has_bssid ? bssid : NULL);
         }
     }
 
@@ -474,8 +548,10 @@ static void cmd_start_monitor(daemon_t *d, const char *id, const char *params)
     }
 
     (void)snprintf(data, sizeof(data),
-        "{\"monitor_active\":true,\"channel\":%d,\"stream_target\":\"%s\"}",
-        channel, stream_target);
+        "{\"monitor_active\":true,\"channel\":%d,\"stream_target\":\"%s\","
+        "\"persist\":%s,\"ttl_sec\":%d}",
+        channel, stream_target,
+        d->monitor_persist ? "true" : "false", d->monitor_ttl_sec);
     send_ok(d, id, data);
 }
 
@@ -483,7 +559,8 @@ static void cmd_stop_monitor(daemon_t *d, const char *id)
 {
     char data[128];
 
-    if (d->state != STATE_MONITORING && d->state != STATE_INJECTING) {
+    if (d->state != STATE_MONITORING && d->state != STATE_INJECTING
+        && d->radio_mode != RADIO_MONITOR) {
         send_error(d, id, "NOT_MONITORING",
                    "Monitor mode is not active");
         return;
@@ -626,18 +703,18 @@ static void cmd_set_filter(daemon_t *d, const char *id, const char *params)
     char bssid_str[32];
     uint8_t bssid[6];
     bool has_bssid = false;
-    int mgmt_only = 0;
-    int reset = 0;
+    bool mgmt_only = false;
+    bool reset = false;
     char data[128];
 
-    (void)json_get_int(params, "reset", &reset);
+    (void)json_get_bool(params, "reset", &reset);
     if (reset) {
         (void)capture_set_filter(d, false, NULL);
         send_ok(d, id, "{\"filter_active\":false}");
         return;
     }
 
-    (void)json_get_int(params, "mgmt_only", &mgmt_only);
+    (void)json_get_bool(params, "mgmt_only", &mgmt_only);
 
     if (json_get_str(params, "bssid", bssid_str, sizeof(bssid_str)) == 0) {
         if (util_parse_mac(bssid_str, bssid) < 0) {
@@ -647,7 +724,7 @@ static void cmd_set_filter(daemon_t *d, const char *id, const char *params)
         has_bssid = true;
     }
 
-    if (capture_set_filter(d, mgmt_only != 0, has_bssid ? bssid : NULL) < 0) {
+    if (capture_set_filter(d, mgmt_only, has_bssid ? bssid : NULL) < 0) {
         send_error(d, id, "FILTER_ERROR", "Failed to attach BPF filter");
         return;
     }
@@ -660,18 +737,63 @@ static void cmd_set_filter(daemon_t *d, const char *id, const char *params)
     send_ok(d, id, data);
 }
 
+/*
+ * inject_rewrite_rate — Overwrite the 802.11 radiotap Rate field in place.
+ *
+ * The CLI builds a complete radiotap header, so the rate is normally already
+ * correct; this keeps the documented `rate_mbps` parameter honest for callers
+ * that send a bare frame with a default header.
+ */
+static void inject_rewrite_rate(uint8_t *frame, size_t len, int rate_mbps)
+{
+    static const uint8_t size[16]  = {8,1,1,4,2,1,1,2,2,2,1,1,1,1,2,2};
+    static const uint8_t align[16] = {8,1,1,2,2,1,1,2,2,2,1,1,1,1,2,2};
+    uint32_t present = 0;
+    size_t   words = 0;
+    size_t   off;
+    size_t   i;
+
+    if (!frame || len < 8 || rate_mbps <= 0) { return; }
+
+    /* Walk the present bitmaps (bit 31 continues the list). */
+    for (i = 4; i + 4 <= len && words < 8; i += 4) {
+        present = (uint32_t)frame[i]
+                | ((uint32_t)frame[i + 1] << 8)
+                | ((uint32_t)frame[i + 2] << 16)
+                | ((uint32_t)frame[i + 3] << 24);
+        words++;
+        if (!(present & 0x80000000u)) { break; }
+    }
+    if (words == 0) { return; }
+    off = 4 + words * 4;
+
+    for (i = 0; i < 16; i++) {
+        if (!(present & (1u << i))) { continue; }
+
+        off = (off + align[i] - 1u) & ~(size_t)(align[i] - 1u);
+        if (i == 2) {
+            if (off < len) { frame[off] = (uint8_t)(rate_mbps * 2); }
+            return;
+        }
+        off += size[i];
+        if (off > len) { return; }
+    }
+}
+
 static void cmd_send_injection(daemon_t *d, const char *id, const char *params)
 {
-    static char      frame_hex[4096];
-    static uint8_t   frame_bin[2048];
+    static char      frame_hex[TX_SLOT_BYTES * 2 + 2];
+    static uint8_t   frame_bin[TX_SLOT_BYTES];
     int              count       = 1;
     int              interval_ms = 0;
+    int              rate_mbps   = 0;
     size_t           frame_len   = 0;
     int              sent        = 0;
     int              queued      = 0;
-    int              failed      = 0;
+    int              dropped     = 0;
+    int              requested;
     int              i;
-    char             data[128];
+    char             data[256];
 
     if (d->state != STATE_MONITORING && d->state != STATE_INJECTING) {
         send_error(d, id, "NOT_MONITORING",
@@ -693,11 +815,18 @@ static void cmd_send_injection(daemon_t *d, const char *id, const char *params)
 
     (void)json_get_int(params, "count", &count);
     (void)json_get_int(params, "interval_ms", &interval_ms);
+    (void)json_get_int(params, "rate_mbps", &rate_mbps);
 
     if (count < 1)  { count = 1; }
-    if (count > 256) { count = 256; }  /* sanity cap */
+    if (count > 10000) { count = 10000; }   /* sanity bound, not a queue cap */
     if (interval_ms < 0)     { interval_ms = 0; }
     if (interval_ms > 60000) { interval_ms = 60000; }
+    requested = count;
+
+    /* Optional PHY rate override: rewrite the radiotap Rate field in place. */
+    if (rate_mbps > 0) {
+        inject_rewrite_rate(frame_bin, frame_len, rate_mbps);
+    }
 
     /* Open TX socket lazily */
     if (!d->mock_mode && tx_open(d) < 0) {
@@ -714,14 +843,35 @@ static void cmd_send_injection(daemon_t *d, const char *id, const char *params)
         d->tx_q.next_tx_ms  = util_monotonic_ms();
     }
 
-    /* Enqueue frames into non-blocking TX ring (§3.3) */
+    d->inject_requested += (uint64_t)requested;
+
+    /*
+     * Enqueue the whole burst.  The old code capped the queue at 64 and
+     * silently discarded everything above it while still reporting the
+     * requested count, so a 200-frame deauth actually put ~60 frames on air.
+     * With 256 slots a full-size burst fits; if an earlier burst is still
+     * draining, wait briefly (unpaced) or report the exact shortfall.
+     */
     for (i = 0; i < count; i++) {
+        tx_slot_t *slot;
+        int guard = 0;
+
+        while (d->tx_q.count >= TX_QUEUE_MAX) {
+            if (d->tx_q.interval_ms == 0) {
+                (void)tx_queue_drain_step(d);
+            }
+            if (d->tx_q.count < TX_QUEUE_MAX) { break; }
+            if (++guard > 400) { break; }      /* ~2 s at 5 ms */
+            util_sleep_ms(5);
+        }
+
         if (d->tx_q.count >= TX_QUEUE_MAX) {
-            failed++;
-            d->inject_failures++;
+            dropped++;
+            d->inject_dropped++;
             continue;
         }
-        tx_slot_t *slot = &d->tx_q.slots[d->tx_q.head];
+
+        slot = &d->tx_q.slots[d->tx_q.head];
         memcpy(slot->frame, frame_bin, frame_len);
         slot->len = (uint16_t)frame_len;
         slot->retries = 0;
@@ -746,26 +896,31 @@ static void cmd_send_injection(daemon_t *d, const char *id, const char *params)
 
     if (!d->mock_mode) {
         util_trace("inject",
-                   "frames=%d interval_ms=%d queued=%d sent=%d failed=%d",
-                   count, interval_ms, queued, sent, failed);
+                   "requested=%d interval_ms=%d queued=%d sent=%d dropped=%d",
+                   requested, interval_ms, queued, sent, dropped);
     }
 
-    if (queued == 0 && failed > 0) {
+    if (queued == 0 && dropped > 0) {
         send_error(d, id, "TX_QUEUE_FULL",
                    "TX queue saturated");
         return;
     }
 
     (void)snprintf(data, sizeof(data),
-        "{\"frames_sent\":%d,\"frames_queued\":%d,\"frames_failed\":%d}",
-        sent, queued - sent, failed);
+        "{\"frames_requested\":%d,\"frames_queued\":%d,"
+        "\"frames_sent\":%d,\"frames_failed\":%d,"
+        "\"frames_pending\":%d,\"tx_queue_depth\":%d,"
+        "\"tx_queue_max\":%u}",
+        requested, queued, sent, dropped, queued - sent, (int)d->tx_q.count,
+        TX_QUEUE_MAX);
     send_ok(d, id, data);
 }
 
 static void cmd_set_tx_power(daemon_t *d, const char *id, const char *params)
 {
     int  dbm = 0;
-    char data[32];
+    int  actual = 0;
+    char data[160];
 
     if (json_get_int(params, "power_dbm", &dbm) < 0) {
         send_error(d, id, "INVALID_PARAMS", "Missing power_dbm parameter");
@@ -777,12 +932,15 @@ static void cmd_set_tx_power(daemon_t *d, const char *id, const char *params)
         return;
     }
 
-    if (radio_set_txpower(d, dbm) < 0) {
+    if (radio_set_txpower(d, dbm, &actual) < 0) {
         send_error(d, id, "INTERFACE_ERROR", "txpower set failed");
         return;
     }
 
-    (void)snprintf(data, sizeof(data), "{\"power_dbm\":%d}", dbm);
+    (void)snprintf(data, sizeof(data),
+        "{\"power_dbm\":%d,\"requested_dbm\":%d,\"clamped\":%s,"
+        "\"persisted\":true}",
+        actual, dbm, actual != dbm ? "true" : "false");
     send_ok(d, id, data);
 }
 
@@ -790,11 +948,14 @@ static void cmd_set_mac(daemon_t *d, const char *id, const char *params)
 {
     char    macstr[18];
     uint8_t mac[6];
-    char    data[32];
+    uint8_t applied[6];
+    char    data[160];
+    char    requested_mac[18];
     char    result_mac[18];
     int     r;
 
-    if (d->state == STATE_MONITORING || d->state == STATE_INJECTING) {
+    if (d->state == STATE_MONITORING || d->state == STATE_INJECTING
+        || d->radio_mode == RADIO_MONITOR) {
         send_error(d, id, "MONITORING_ACTIVE",
                    "MAC cannot be changed while monitor mode is active");
         return;
@@ -830,14 +991,24 @@ static void cmd_set_mac(daemon_t *d, const char *id, const char *params)
         mac[0] = (uint8_t)((mac[0] & 0xFEu) | 0x02u);
     }
 
+    util_mac_to_str(mac, requested_mac, sizeof(requested_mac));
+
     r = radio_set_mac(d, mac);
     if (r < 0) {
         send_error(d, id, "INTERFACE_ERROR", "Failed to set MAC address");
         return;
     }
 
-    util_mac_to_str(mac, result_mac, sizeof(result_mac));
-    (void)snprintf(data, sizeof(data), "{\"mac\":\"%s\"}", result_mac);
+    /* Report what the driver actually holds, not what we asked for. */
+    if (radio_read_mac(d, applied) != 0) {
+        memcpy(applied, mac, 6);
+    }
+    util_mac_to_str(applied, result_mac, sizeof(result_mac));
+    (void)snprintf(data, sizeof(data),
+        "{\"mac\":\"%s\",\"requested_mac\":\"%s\",\"applied\":%s,"
+        "\"persisted\":true}",
+        result_mac, requested_mac,
+        memcmp(applied, mac, 6) == 0 ? "true" : "false");
     send_ok(d, id, data);
 }
 
@@ -925,9 +1096,10 @@ static void cmd_wifi_connect(daemon_t *d, const char *id, const char *params)
     char psk[80];
     char bssid[32];
     char enc[32];
+    char macstr[18];
     char esc_ssid[SCAN_SSID_MAX * 2 + 2];
-    char data[160];
-    int  share = 1;
+    char data[192];
+    bool share = true;
 
     if (d->mock_mode) {
         send_ok(d, id, "{\"connecting\":true,\"mock\":true}");
@@ -942,12 +1114,13 @@ static void cmd_wifi_connect(daemon_t *d, const char *id, const char *params)
     (void)json_get_str(params, "psk", psk, sizeof(psk));
     (void)json_get_str(params, "bssid", bssid, sizeof(bssid));
     (void)json_get_str(params, "encryption", enc, sizeof(enc));
-    /* Absent means "share" (the CLI default); json_get_int zeroes on miss. */
-    if (json_get_int(params, "share", &share) < 0) {
-        share = 1;
+    (void)json_get_str(params, "mac", macstr, sizeof(macstr));
+    /* Absent means "share" (the CLI default); the wire value is a boolean. */
+    if (json_get_bool(params, "share", &share) < 0) {
+        share = true;
     }
 
-    if (wifi_sta_connect(d, ssid, psk, bssid, enc, share != 0) < 0) {
+    if (wifi_sta_connect(d, ssid, psk, bssid, enc, macstr, share) < 0) {
         send_error(d, id, "INTERFACE_ERROR",
                    "Failed to configure the station profile (see logread)");
         return;
@@ -955,7 +1128,8 @@ static void cmd_wifi_connect(daemon_t *d, const char *id, const char *params)
 
     util_json_escape(ssid, esc_ssid, sizeof(esc_ssid));
     (void)snprintf(data, sizeof(data),
-        "{\"connecting\":true,\"ssid\":\"%s\"}", esc_ssid);
+        "{\"connecting\":true,\"ssid\":\"%s\",\"share\":%s}",
+        esc_ssid, share ? "true" : "false");
     send_ok(d, id, data);
 }
 
@@ -1205,7 +1379,9 @@ int ctrl_accept(daemon_t *d)
 
     d->ctrl_client_fd    = cfd;
     d->host_ip           = peer.sin_addr.s_addr;
-    d->state             = STATE_CONNECTED;
+    /* A persisted monitor session keeps running across this reconnect. */
+    d->state             = (d->radio_mode == RADIO_MONITOR)
+                               ? STATE_MONITORING : STATE_CONNECTED;
     d->client_authed     = !d->psk_required;
     d->last_activity_sec = util_monotonic_sec();
     (void)util_random_hex(d->auth_nonce, 32);
@@ -1376,9 +1552,12 @@ void ctrl_send(daemon_t *d, const char *json_line)
     size_t  len;
     ssize_t sent;
     size_t  off = 0;
+    int64_t deadline;
 
     if (d->ctrl_client_fd < 0 || !json_line) { return; }
     len = strlen(json_line);
+    /* A peer that stopped reading must not wedge the single-threaded loop. */
+    deadline = util_monotonic_ms() + 2000;
 
     while (off < len) {
         do {
@@ -1387,6 +1566,11 @@ void ctrl_send(daemon_t *d, const char *json_line)
 
         if (sent < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (util_monotonic_ms() >= deadline) {
+                    util_log("ctrl", "send: peer stalled, dropping client");
+                    ctrl_close_client(d);
+                    return;
+                }
                 util_sleep_ms(1);
                 continue;
             }
@@ -1408,11 +1592,20 @@ void ctrl_close_client(daemon_t *d)
         close(d->ctrl_client_fd);
         d->ctrl_client_fd = -1;
     }
-    if (was_monitoring) {
+    /*
+     * A persisted monitor session survives the disconnect: the radio keeps
+     * capturing (and the TTL timer, if any, still bounds it).  Anything else
+     * is torn down so the router always gets its radio back.
+     */
+    if (was_monitoring && !d->monitor_persist) {
         ctrl_teardown_monitor(d);
+    } else if (was_monitoring) {
+        util_log("ctrl", "client gone; monitor persists (ttl=%d s)",
+                 d->monitor_ttl_sec);
     }
     util_log("ctrl", "client gone");
-    d->state         = STATE_IDLE;
+    d->state         = (d->radio_mode == RADIO_MONITOR)
+                           ? STATE_MONITORING : STATE_IDLE;
     d->client_authed = false;
     d->host_ip       = 0;
     s_linelen        = 0;

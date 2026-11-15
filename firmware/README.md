@@ -32,21 +32,34 @@ Files placed under `firmware/files/` are injected verbatim into the rootfs:
 | `etc/uci-defaults/99-pwn4c` | First-boot configuration (LAN, DHCP, wireless, dropbear) |
 | `etc/sysupgrade.conf` | Paths preserved across sysupgrade |
 | `etc/dropbear/authorized_keys` | SSH public keys (empty by default — see credential policy) |
+| `etc/init.d/pwn4c-net` | LAN/DHCP repair pass on boot |
 | `etc/init.d/pwn4c-radio` | Boot-safety guard: keeps wireless DOWN until daemon drives it |
+| `etc/init.d/pwn4cd` | Starts the implant daemon |
+| `usr/lib/pwn4c/provision.sh` | Shared provisioning helpers used by the init scripts |
+| `usr/lib/pwn4c/share.sh` | NAT (`masquerade` + MSS clamp) for the upstream station link |
 | `etc/banner` | Login banner |
+
+`build.sh` stages `usr/sbin/pwn4cd` and `etc/init.d/pwn4cd` (plus the
+`S19`/`S21`/`S95` rc.d symlinks) from the cross-compiled daemon; those files are
+build outputs and are not committed.
 
 ## Packages
 
 ```
-iw tcpdump-mini
+iw wpa-cli tcpdump-mini nftables kmod-nft-nat
 ```
+
+`kmod-mt76-core` and `kmod-mt7603` are installed from `firmware/prebuilt/`
+(checksum-verified) so the image matches the 23.05.5 kernel ABI.
 
 Removed from the OpenWrt default set:
 ```
 -ppp -ppp-mod-pppoe -firewall4 -odhcpd-ipv6only -odhcp6c -kmod-ipv6
 ```
 
-`dnsmasq` is **kept** — it serves DHCP on `192.168.4.0/24`.
+`dnsmasq` is **kept** — it serves DHCP on `192.168.4.0/24`. `firewall4` stays
+excluded: `nftables` and `kmod-nft-nat` only provide the `nft` binary and the
+masquerade expression that `share.sh` needs.
 
 ## Budget
 

@@ -135,6 +135,247 @@ static int iface_set_mac(const char *ifname, const uint8_t mac[6])
     return (r < 0) ? -1 : 0;
 }
 
+/*
+ * iface_is_up — Current IFF_UP flag, or -1 when the netdev does not exist.
+ */
+static int iface_is_up(const char *ifname)
+{
+    struct ifreq ifr;
+    int fd;
+    int r;
+
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) { return -1; }
+
+    memset(&ifr, 0, sizeof(ifr));
+    (void)snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
+    r = ioctl(fd, SIOCGIFFLAGS, &ifr);
+    close(fd);
+    if (r < 0) { return -1; }
+    return (ifr.ifr_flags & IFF_UP) ? 1 : 0;
+}
+
+/*
+ * iface_type — nl80211 mode string ("AP", "managed", "monitor", ...) for a
+ * netdev, or -1 when the interface is gone / iw is unavailable.
+ */
+static int iface_type(const char *ifname, char *type, size_t typesz)
+{
+    char cmd[80];
+    char out[512];
+    const char *p;
+    size_t i = 0;
+
+    if (!ifname || !type || typesz == 0) { return -1; }
+    type[0] = '\0';
+    (void)snprintf(cmd, sizeof(cmd), "iw dev %s info 2>/dev/null", ifname);
+    if (util_run_cmd_capture(cmd, out, sizeof(out), IW_TIMEOUT_SECS) != 0) {
+        return -1;
+    }
+    p = strstr(out, "type ");
+    if (!p) { return -1; }
+    p += strlen("type ");
+    while (p[i] != '\0' && p[i] != '\n' && p[i] != ' ' && i + 1 < typesz) {
+        type[i] = p[i];
+        i++;
+    }
+    type[i] = '\0';
+    return type[0] != '\0' ? 0 : -1;
+}
+
+/*
+ * radio_detect_ifaces — Resolve the AP/monitor and station netdev names.
+ *
+ * OpenWrt 23.05 creates `phy0-ap0` and `phy0-sta0`; older images used `wlan0`.
+ * Guessing either name breaks MAC changes, TX power and `wpa_cli` with ENODEV,
+ * so the names are read from `iw dev` instead.  `--iface` always wins for the
+ * AP-side netdev; the station netdev is always auto-detected.
+ */
+int radio_detect_ifaces(daemon_t *d)
+{
+    char out[1024];
+    char names[8][IFNAMSIZ];
+    int  n = 0;
+    int  i;
+    char ap[IFNAMSIZ]  = "";
+    char sta[IFNAMSIZ] = "";
+    const char *p;
+
+    if (d->mock_mode) { return 0; }
+
+    if (util_run_cmd_capture("iw dev 2>/dev/null", out, sizeof(out),
+                             IW_TIMEOUT_SECS) != 0) {
+        return -1;
+    }
+
+    p = out;
+    while (p != NULL && *p != '\0' && n < 8) {
+        const char *q = strstr(p, "Interface ");
+        size_t j = 0;
+
+        if (!q) { break; }
+        q += strlen("Interface ");
+        while (q[j] != '\0' && q[j] != '\n' && q[j] != ' ' && j + 1 < IFNAMSIZ) {
+            names[n][j] = q[j];
+            j++;
+        }
+        names[n][j] = '\0';
+        if (j > 0) { n++; }
+        p = q + j;
+    }
+
+    for (i = 0; i < n; i++) {
+        char type[24];
+
+        if (iface_type(names[i], type, sizeof(type)) != 0) { continue; }
+
+        if (ap[0] == '\0'
+            && (strcmp(type, "AP") == 0 || strcmp(type, "monitor") == 0
+                || strcmp(type, "P2P-GO") == 0)) {
+            (void)snprintf(ap, sizeof(ap), "%s", names[i]);
+        }
+        if (sta[0] == '\0'
+            && (strcmp(type, "managed") == 0 || strcmp(type, "station") == 0)) {
+            (void)snprintf(sta, sizeof(sta), "%s", names[i]);
+        }
+    }
+
+    if (!d->cli_iface && ap[0] != '\0') {
+        (void)snprintf(d->wlan_iface, sizeof(d->wlan_iface), "%s", ap);
+    } else if (!d->cli_iface && n > 0 && if_nametoindex(d->wlan_iface) == 0) {
+        /* No AP interface (monitor/sta-only image): take the first netdev. */
+        (void)snprintf(d->wlan_iface, sizeof(d->wlan_iface), "%s", names[0]);
+    }
+
+    if (sta[0] != '\0') {
+        (void)snprintf(d->sta_iface, sizeof(d->sta_iface), "%s", sta);
+    } else if (d->sta_iface[0] == '\0') {
+        (void)snprintf(d->sta_iface, sizeof(d->sta_iface), "%s",
+                       STA_IFACE_DEFAULT);
+    }
+
+    /* A leftover monitor vif may hide the AP type; keep the configured name. */
+    if (if_nametoindex(d->wlan_iface) == 0 && n > 0) {
+        (void)snprintf(d->wlan_iface, sizeof(d->wlan_iface), "%s", names[0]);
+    }
+
+    util_log("radio", "interfaces: ap=%s sta=%s", d->wlan_iface, d->sta_iface);
+    return 0;
+}
+
+/*
+ * radio_sta_netdev — Current station netdev name.
+ *
+ * netifd destroys/recreates `phy0-sta0` on every `wifi reload`, so the name
+ * cached at start-up may be stale.  Re-scan when the cached netdev is gone.
+ */
+const char *radio_sta_netdev(daemon_t *d)
+{
+    char out[1024];
+    const char *p;
+
+    if (d->sta_iface[0] != '\0' && if_nametoindex(d->sta_iface) != 0) {
+        return d->sta_iface;
+    }
+    if (d->mock_mode) { return d->sta_iface; }
+
+    if (util_run_cmd_capture("iw dev 2>/dev/null", out, sizeof(out),
+                             IW_TIMEOUT_SECS) == 0) {
+        p = out;
+        while (p != NULL && *p != '\0') {
+            const char *q = strstr(p, "Interface ");
+            char name[IFNAMSIZ];
+            char type[24];
+            size_t j = 0;
+
+            if (!q) { break; }
+            q += strlen("Interface ");
+            while (q[j] != '\0' && q[j] != '\n' && q[j] != ' '
+                   && j + 1 < IFNAMSIZ) {
+                name[j] = q[j];
+                j++;
+            }
+            name[j] = '\0';
+            if (j > 0 && iface_type(name, type, sizeof(type)) == 0
+                && (strcmp(type, "managed") == 0
+                    || strcmp(type, "station") == 0)) {
+                (void)snprintf(d->sta_iface, sizeof(d->sta_iface), "%s", name);
+                return d->sta_iface;
+            }
+            p = q + j;
+        }
+    }
+    return d->sta_iface;
+}
+
+/*
+ * radio_read_mac — Current hardware address of the AP/monitor netdev.
+ */
+int radio_read_mac(daemon_t *d, uint8_t mac[6])
+{
+    struct ifreq ifr;
+    int fd;
+    int r;
+
+    if (!mac) { return -1; }
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) { return -1; }
+
+    memset(&ifr, 0, sizeof(ifr));
+    (void)snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", d->wlan_iface);
+    r = ioctl(fd, SIOCGIFHWADDR, &ifr);
+    close(fd);
+    if (r < 0) { return -1; }
+    memcpy(mac, ifr.ifr_hwaddr.sa_data, 6);
+    return 0;
+}
+
+/*
+ * radio_get_channel — Channel actually configured on the AP/monitor netdev.
+ * Returns -1 when iw cannot report it (the caller then trusts its own value).
+ */
+int radio_get_channel(daemon_t *d, int *channel)
+{
+    char cmd[80];
+    char out[512];
+    const char *p;
+
+    if (!channel) { return -1; }
+    *channel = 0;
+    (void)snprintf(cmd, sizeof(cmd), "iw dev %s info 2>/dev/null",
+                   d->wlan_iface);
+    if (util_run_cmd_capture(cmd, out, sizeof(out), IW_TIMEOUT_SECS) != 0) {
+        return -1;
+    }
+    p = strstr(out, "channel ");
+    if (!p) { return -1; }
+    *channel = atoi(p + strlen("channel "));
+    return *channel > 0 ? 0 : -1;
+}
+
+/*
+ * radio_get_txpower — Current TX power in dBm from `iw dev ... info`.
+ * Returns -1 when unknown (interface down, old iw, mock mode).
+ */
+int radio_get_txpower(daemon_t *d, int *dbm)
+{
+    char cmd[80];
+    char out[512];
+    const char *p;
+
+    if (!dbm) { return -1; }
+    *dbm = 0;
+    (void)snprintf(cmd, sizeof(cmd), "iw dev %s info 2>/dev/null",
+                   d->wlan_iface);
+    if (util_run_cmd_capture(cmd, out, sizeof(out), IW_TIMEOUT_SECS) != 0) {
+        return -1;
+    }
+    p = strstr(out, "txpower ");
+    if (!p) { return -1; }
+    *dbm = atoi(p + strlen("txpower "));
+    return *dbm > 0 ? 0 : -1;
+}
+
 /* ── Generic Netlink (nl80211) Helpers ───────────────────────────────────── */
 
 #ifndef NLA_OK
@@ -628,6 +869,9 @@ int radio_enter_monitor(daemon_t *d, int channel)
         return -1;
     }
 
+    /* netifd may have renamed the vifs since the last session */
+    (void)radio_detect_ifaces(d);
+
     /* Save state before entering monitor */
     d->saved_channel    = d->channel > 0 ? d->channel : 6;
     d->saved_radio_mode = d->radio_mode;
@@ -722,15 +966,22 @@ int radio_exit_monitor(daemon_t *d)
     /* Bring link down via POSIX ioctl before switching type */
     (void)iface_set_up(d->wlan_iface, false);
 
-    /* Restore managed type */
+    if (d->saved_radio_mode == RADIO_NORMAL) {
+        /*
+         * Delete the capture vif instead of renaming it back to managed.
+         * netifd owns `phy0-ap0`/`phy0-sta0`; leaving the name occupied made
+         * `wifi up` create `phy0-ap1` while the stale vif stayed behind, so
+         * the radio looked "restored" but the AP was gone until reboot.
+         */
+        (void)iw_run("iw dev %s del 2>/dev/null; true", d->wlan_iface);
+        return radio_restore_normal(d);
+    }
+
+    /* Restore managed type for the boot-safe DOWN state */
 #ifndef USE_IW_FALLBACK
     (void)nl80211_set_type(d, NL80211_IFTYPE_STATION);
 #endif
     (void)iw_run("iw dev %s set type managed 2>/dev/null; true", d->wlan_iface);
-
-    if (d->saved_radio_mode == RADIO_NORMAL) {
-        return radio_restore_normal(d);
-    }
 
     /* Default: leave DOWN */
     d->radio_mode = RADIO_DOWN;
@@ -746,97 +997,236 @@ int radio_exit_monitor(daemon_t *d)
 int radio_set_channel(daemon_t *d, int channel)
 {
     int r;
+    int actual = 0;
     MOCK_RETURN(d);
 
     if (channel < CHAN_MIN || channel > CHAN_MAX) { return -1; }
 
 #ifndef USE_IW_FALLBACK
     r = nl80211_set_channel(d, channel);
-    if (r == 0) {
-        d->channel = channel;
-        util_log("radio", "channel -> %d (nl80211)", channel);
-        return 0;
-    }
+#else
+    r = -1;
 #endif
 
-    /* Fallback to iw */
-    r = iw_run("iw dev %s set channel %d HT20", d->wlan_iface, channel);
     if (r != 0) {
-        r = iw_run("iw dev %s set channel %d", d->wlan_iface, channel);
+        /* Fallback to iw */
+        r = iw_run("iw dev %s set channel %d HT20", d->wlan_iface, channel);
         if (r != 0) {
-            util_log("radio", "channel switch to %d failed: %d", channel, r);
-            return -1;
+            r = iw_run("iw dev %s set channel %d", d->wlan_iface, channel);
+            if (r != 0) {
+                util_log("radio", "channel switch to %d failed: %d", channel, r);
+                return -1;
+            }
         }
     }
+
+    /*
+     * Verify.  cfg80211 can accept SET_WIPHY and still keep the old channel
+     * (regulatory restriction, concurrent AP vif, driver clamp).  Trusting
+     * the ACK made `status` report a channel the radio was never on.
+     */
+    if (radio_get_channel(d, &actual) == 0 && actual != channel) {
+        util_log("radio", "channel switch to %d not applied (radio is on %d)",
+                 channel, actual);
+        d->channel = actual;
+        return -1;
+    }
+
     d->channel = channel;
-    util_log("radio", "channel -> %d (iw fallback)", channel);
+    util_log("radio", "channel -> %d", channel);
     return 0;
 }
 
 /*
- * radio_set_txpower — Set TX power in dBm using nl80211 or iw.
+ * txpower_persist — Store the requested power in UCI so a reboot or `wifi
+ * reload` does not silently restore the stock value.
  */
-int radio_set_txpower(daemon_t *d, int dbm)
+static void txpower_persist(int dbm)
+{
+    char cmd[96];
+    (void)snprintf(cmd, sizeof(cmd),
+                   "uci -q set wireless.radio0.txpower='%d' && uci commit wireless",
+                   dbm);
+    (void)util_run_cmd_timeout(cmd, 5);
+}
+
+/*
+ * radio_set_txpower — Set TX power in dBm using nl80211 or iw.
+ *
+ * `*actual_dbm` receives the value read back from the driver.  MT7628 clamps
+ * the PA to roughly 14 dBm depending on the channel/rate; reporting the
+ * requested value as success was the source of the "20 dBm" field bug.
+ * Returns 0 when the request was accepted, -1 when the driver rejected it.
+ */
+int radio_set_txpower(daemon_t *d, int dbm, int *actual_dbm)
 {
     int r;
     int mbm;
-    MOCK_RETURN(d);
+    int actual = 0;
 
     if (dbm < 1 || dbm > DAEMON_MAX_TXPWR) { return -1; }
     mbm = dbm * 100;
+    if (actual_dbm) { *actual_dbm = dbm; }
+    MOCK_RETURN(d);
 
 #ifndef USE_IW_FALLBACK
     r = nl80211_set_txpower(d, mbm);
-    if (r == 0) {
-        d->tx_power_dbm = dbm;
-        util_log("radio", "txpower -> %d dBm (nl80211)", dbm);
-        return 0;
+    if (r != 0) {
+        /* iw fallback below */
     }
+#else
+    r = -1;
 #endif
 
-    /* Fallback to iw: phy0 is always valid even when the network interface is down */
-    r = iw_run("iw phy phy0 set txpower fixed %d", mbm);
     if (r != 0) {
-        r = iw_run("iw dev %s set txpower fixed %d", d->wlan_iface, mbm);
+        /* `phy` is valid even when the network interface is down */
+        r = iw_run("iw phy phy0 set txpower fixed %d", mbm);
+        if (r != 0) {
+            r = iw_run("iw dev %s set txpower fixed %d", d->wlan_iface, mbm);
+        }
     }
 
     if (r != 0) {
         util_log("radio", "txpower %d dBm failed: %d", dbm, r);
         return -1;
     }
-    d->tx_power_dbm = dbm;
-    util_log("radio", "txpower -> %d dBm (iw fallback)", dbm);
+
+    /* Read back what the hardware actually accepted. */
+    if (radio_get_txpower(d, &actual) != 0 || actual <= 0) {
+        actual = dbm;   /* driver does not report: keep the requested value */
+    }
+    d->tx_power_dbm = actual;
+    if (actual != dbm) {
+        util_log("radio", "txpower requested %d dBm, hardware applied %d dBm "
+                          "(PA/driver clamp)", dbm, actual);
+    } else {
+        util_log("radio", "txpower -> %d dBm", actual);
+    }
+    txpower_persist(dbm);
+    if (actual_dbm) { *actual_dbm = actual; }
     return 0;
 }
 
 /*
- * radio_set_mac — Change the interface MAC address using standard POSIX ioctl.
- * Interface must be DOWN before changing hardware address.
+ * mac_persist — Store the MAC in every AP wifi-iface section plus the station
+ * section, then commit.  Without this the address reverted on the next
+ * `wifi reload` / reboot, which is exactly what the field report saw.
+ */
+static void mac_persist(const char *macstr)
+{
+    char cmd[640];
+
+    (void)snprintf(cmd, sizeof(cmd),
+        "for s in $(uci show wireless 2>/dev/null | "
+        "sed -n \"s/^wireless\\.\\([^.=]*\\)\\.mode='ap'$/\\1/p\"); do "
+        "uci -q set wireless.$s.macaddr='%s'; done; "
+        "uci -q set wireless.pwn4c_sta.macaddr='%s'; "
+        "uci commit wireless",
+        macstr, macstr);
+    if (util_run_cmd_timeout(cmd, 5) != 0) {
+        util_log("radio", "MAC %s applied but UCI persist failed", macstr);
+    }
+}
+
+/*
+ * radio_set_mac — Change the AP/monitor netdev MAC and persist it.
+ *
+ * The interface is bounced only when it was already up, so applying a saved
+ * MAC at boot does not take the radio out of its boot-safe DOWN state.
+ * The address is read back with SIOCGIFHWADDR: if the driver kept a different
+ * value (mac80211 address mask, vif already running), the call fails instead
+ * of reporting a success that never happened.
  */
 int radio_set_mac(daemon_t *d, const uint8_t mac[6])
 {
     int r;
+    int was_up;
+    uint8_t got[6];
     char macstr[18];
+    char gotstr[18];
+
     MOCK_RETURN(d);
 
+    (void)radio_detect_ifaces(d);
     util_mac_to_str(mac, macstr, sizeof(macstr));
 
-    /* Interface must be down (POSIX ioctl) */
-    (void)iface_set_up(d->wlan_iface, false);
+    was_up = iface_is_up(d->wlan_iface);
+    if (was_up == 1) {
+        (void)iface_set_up(d->wlan_iface, false);
+    }
 
     /* Apply MAC via SIOCSIFHWADDR ioctl */
     r = iface_set_mac(d->wlan_iface, mac);
     if (r != 0) {
         /* Fallback if driver requires ip command */
         r = iw_run("ip link set %s address %s", d->wlan_iface, macstr);
-        if (r != 0) {
-            util_log("radio", "MAC set %s failed: %d", macstr, r);
-            return -1;
+    }
+
+    if (was_up == 1) {
+        (void)iface_set_up(d->wlan_iface, true);
+    }
+
+    if (r != 0) {
+        util_log("radio", "MAC set %s failed: %d", macstr, r);
+        return -1;
+    }
+
+    if (radio_read_mac(d, got) == 0) {
+        if (memcmp(got, mac, 6) != 0) {
+            /* One retry through iproute2: some drivers only accept it there. */
+            (void)iw_run("ip link set %s address %s", d->wlan_iface, macstr);
+            if (radio_read_mac(d, got) != 0 || memcmp(got, mac, 6) != 0) {
+                util_mac_to_str(got, gotstr, sizeof(gotstr));
+                util_log("radio", "MAC set %s rejected by driver (still %s)",
+                         macstr, gotstr);
+                return -1;
+            }
         }
+        memcpy(d->current_mac, got, 6);
     }
 
     memcpy(d->mac_override, mac, 6);
     d->mac_override_set = true;
-    util_log("radio", "MAC -> %s (ioctl)", macstr);
+    mac_persist(macstr);
+    util_log("radio", "MAC -> %s on %s (persisted)", macstr, d->wlan_iface);
+    return 0;
+}
+
+/*
+ * radio_apply_persisted — Re-apply the MAC and TX power saved in UCI.
+ *
+ * OpenWrt's netifd owns the wifi-iface at boot: without this the daemon came
+ * up with the stock MAC/power even though `config --mac` had reported success.
+ */
+int radio_apply_persisted(daemon_t *d)
+{
+    char   buf[64];
+    uint8_t mac[6];
+
+    if (d->mock_mode) { return 0; }
+
+    if (util_run_cmd_capture("uci -q get wireless.radio0.txpower",
+                             buf, sizeof(buf), 2) == 0) {
+        int dbm = atoi(buf);
+        int actual = 0;
+
+        if (dbm >= 1 && dbm <= DAEMON_MAX_TXPWR
+            && radio_set_txpower(d, dbm, &actual) == 0) {
+            util_log("radio", "restored TX power %d dBm (hardware %d dBm)",
+                     dbm, actual);
+        }
+    }
+
+    buf[0] = '\0';
+    if (util_run_cmd_capture("uci -q get wireless.default_radio0.macaddr",
+                             buf, sizeof(buf), 2) != 0 || buf[0] == '\0') {
+        (void)util_run_cmd_capture("uci -q get wireless.pwn4c_sta.macaddr",
+                                   buf, sizeof(buf), 2);
+    }
+    if (buf[0] != '\0' && util_parse_mac(buf, mac) == 0) {
+        if (radio_set_mac(d, mac) == 0) {
+            util_log("radio", "restored MAC %s", buf);
+        }
+    }
     return 0;
 }

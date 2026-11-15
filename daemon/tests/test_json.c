@@ -164,6 +164,41 @@ static void test_json_field_exists(void)
           json_field_exists("{}", "x") == 0);
 }
 
+/*
+ * Boolean fields are sent as real JSON booleans by the Go CLI. Parsing them
+ * with json_get_int() failed on the 't'/'f' prefix, which silently disabled
+ * --mgmt-only and --no-share. Both spellings must be accepted.
+ */
+static void test_json_bool(void)
+{
+    bool b = false;
+    int  r;
+
+    r = json_get_bool("{\"mgmt_only\":true}", "mgmt_only", &b);
+    CHECK("bool true", r == 0 && b);
+
+    r = json_get_bool("{\"share\":false}", "share", &b);
+    CHECK("bool false", r == 0 && !b);
+
+    r = json_get_bool("{\"mgmt_only\":1}", "mgmt_only", &b);
+    CHECK("bool int 1", r == 0 && b);
+
+    r = json_get_bool("{\"share\":0}", "share", &b);
+    CHECK("bool int 0", r == 0 && !b);
+
+    r = json_get_bool("{\"share\":\"no\"}", "share", &b);
+    CHECK("bool rejects string", r == -1);
+
+    r = json_get_bool("{\"other\":true}", "share", &b);
+    CHECK("bool missing key", r == -1);
+
+    /* Nested params: the boolean lives inside the params object. */
+    r = json_get_bool("{\"command\":\"WIFI_CONNECT\","
+                      "\"params\":{\"ssid\":\"X\",\"share\":false}}",
+                      "share", &b);
+    CHECK("bool nested params", r == 0 && !b);
+}
+
 static void test_real_commands(void)
 {
     char cmd[64], id[64];
@@ -251,6 +286,7 @@ int run_json_tests(void)
     test_json_get_int();
     test_json_get_int_array();
     test_json_field_exists();
+    test_json_bool();
     test_real_commands();
     return g_failed;
 }

@@ -53,9 +53,13 @@
 /* Control JSON line buffer */
 #define JSON_BUF_LEN        8192
 
-/* Interface names (mt76 default names on OpenWrt for MT7628N — verified live:
- * `iw dev` shows wlan0; ra0 is the old Ralink proprietary naming) */
+/* Interface names.  OpenWrt 23.05 on MT7628N names the netdevs after the phy
+ * (`phy0-ap0`, `phy0-sta0`), while older images used the flat `wlan0` name.
+ * These are only fallbacks: radio_detect_ifaces() resolves the real names at
+ * start-up from `iw dev` + UCI, and every command re-resolves the station
+ * netdev because netifd creates/destroys it at runtime. */
 #define WLAN_IFACE_DEFAULT  "wlan0"
+#define STA_IFACE_DEFAULT   "phy0-sta0"
 #define ETH_IFACE_DEFAULT   "eth0"
 
 /* Default pre-shared key file path on OpenWrt rootfs (§4.1) */
@@ -106,10 +110,17 @@ typedef struct __attribute__((packed)) {
 } slot_hdr_t;
 
 /* ── Non-blocking TX Injection Queue (§3.3, §3.5.7) ───────────────────────── */
-#define TX_QUEUE_MAX        64u
+/* The API accepts up to 256 frames per SEND_INJECTION.  The queue must be able
+ * to hold the whole burst, otherwise the tail is silently discarded and the
+ * caller's "frames_sent" count is a lie. */
+#define TX_QUEUE_MAX        256u
+/* Per-slot payload cap.  Deauth/disassoc/assoc frames are < 128 bytes; 1 KiB
+ * keeps headroom for beacon frames with long IEs while bounding BSS usage to
+ * 256 KiB on a 64 MiB router. */
+#define TX_SLOT_BYTES       1024u
 
 typedef struct {
-    uint8_t  frame[FRAME_SLOT_MAX];
+    uint8_t  frame[TX_SLOT_BYTES];
     uint16_t len;
     uint8_t  retries;
 } tx_slot_t;
@@ -127,9 +138,12 @@ typedef struct {
 typedef struct {
     /* Identity */
     char        drone_id[32];           /* "pwn4c-XXXX" derived from MAC     */
-    char        wlan_iface[16];         /* e.g. "wlan0"                      */
+    char        wlan_iface[16];         /* AP / monitor netdev (phy0-ap0)    */
+    char        sta_iface[16];          /* station netdev (phy0-sta0)        */
     char        eth_iface[16];          /* e.g. "eth0"                       */
+    bool        cli_iface;              /* --iface given: never auto-detect  */
     uint8_t     base_mac[6];            /* read from /sys/class/net/.../address */
+    uint8_t     current_mac[6];         /* last MAC read back from wlan_iface */
 
     /* Radio state */
     radio_mode_t radio_mode;
@@ -186,6 +200,8 @@ typedef struct {
     uint64_t     ring_overruns;         /* ring buffer drops (tail advance count)  */
     uint64_t     inject_frames;         /* frames accepted by the driver           */
     uint64_t     inject_failures;       /* injection TX failures                   */
+    uint64_t     inject_requested;      /* frames requested by SEND_INJECTION      */
+    uint64_t     inject_dropped;        /* frames rejected because queue was full  */
     uint32_t     stream_seq;            /* next stream sequence number        */
 
     /* Autonomous channel hopping state (§3.2) */
@@ -195,6 +211,13 @@ typedef struct {
     int          hop_channel_count;          /* count of channels in hop_channels */
     int          hop_index;                  /* current index in hop_channels  */
     int64_t      next_hop_ms;                /* monotonic millisecond timestamp*/
+
+    /* Monitor session lifetime.  `monitor_persist` keeps the radio in monitor
+     * mode when the control client disconnects (radio stays owned by the
+     * daemon); `monitor_ttl_sec` stops it even if the client vanished. */
+    bool         monitor_persist;
+    int          monitor_ttl_sec;
+    int64_t      monitor_deadline_ms;   /* 0 = no deadline                  */
 
     /* Monitor session start (for timestamp_us) — stored as struct timespec   *
      * to avoid float; we compute µs diff using integer arithmetic.           */
@@ -261,10 +284,18 @@ int     radio_set_down(daemon_t *d);
 int     radio_enter_monitor(daemon_t *d, int channel);
 int     radio_exit_monitor(daemon_t *d);
 int     radio_set_channel(daemon_t *d, int channel);
-int     radio_set_txpower(daemon_t *d, int dbm);
+int     radio_get_channel(daemon_t *d, int *channel);
+int     radio_set_txpower(daemon_t *d, int dbm, int *actual_dbm);
+int     radio_get_txpower(daemon_t *d, int *dbm);
 int     radio_set_mac(daemon_t *d, const uint8_t mac[6]);
+int     radio_read_mac(daemon_t *d, uint8_t mac[6]);
 int     radio_restore_normal(daemon_t *d);
 void    radio_netlink_close(daemon_t *d);
+/* Resolve the real AP/monitor and station netdev names for this image. */
+int     radio_detect_ifaces(daemon_t *d);
+const char *radio_sta_netdev(daemon_t *d);
+/* Re-apply MAC/TX power persisted in UCI after a reboot or wifi reload. */
+int     radio_apply_persisted(daemon_t *d);
 
 /* capture.c */
 int     capture_open(daemon_t *d);
@@ -304,6 +335,7 @@ int     disc_handle(daemon_t *d);
 /* Tiny zero-allocation JSON field extractor */
 int     json_get_str(const char *json, const char *key, char *out, size_t n);
 int     json_get_int(const char *json, const char *key, int *out);
+int     json_get_bool(const char *json, const char *key, bool *out);
 int     json_get_int_array(const char *json, const char *key, int *out, size_t max_out, size_t *out_len);
 int     json_field_exists(const char *json, const char *key);
 
@@ -319,6 +351,14 @@ typedef struct {
     uint16_t ssid_len;        /* advertised length even when hidden          */
     bool     hidden;
     uint16_t beacons;         /* announcement frames seen for this BSSID     */
+    /* WPS (WSC IE, 0xdd / OUI 00:50:f2 / type 4).  Also drives the WPS
+     * "locked" heuristic: an AP that answers with the locked bit set has been
+     * rate-limited after failed PIN attempts. */
+    bool     wps;             /* WSC IE present                              */
+    uint8_t  wps_state;       /* 1 unconfigured, 2 configured                */
+    uint8_t  wps_dp_id;       /* device password id (0 = default PIN)        */
+    uint16_t wps_config_methods;
+    bool     wps_locked;
 } scan_net_t;
 
 int     scan_run(daemon_t *d, int dwell_ms, char *out_json, size_t out_sz);
@@ -328,7 +368,7 @@ int     scan_parse_beacon(const uint8_t *frame, size_t len,
 /* wifi_sta.c — managed station mode (WIFI_CONNECT / STATUS / DISCONNECT)   */
 int     wifi_sta_connect(daemon_t *d, const char *ssid, const char *psk,
                          const char *bssid, const char *encryption,
-                         bool share);
+                         const char *mac, bool share);
 int     wifi_sta_status(daemon_t *d, char *out_json, size_t out_sz);
 int     wifi_sta_disconnect(daemon_t *d);
 

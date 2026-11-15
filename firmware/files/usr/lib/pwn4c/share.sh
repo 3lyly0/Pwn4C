@@ -7,15 +7,16 @@
 # has no route back to it, so replies to forwarded packets are dropped. This
 # script installs the one rule the image is missing.
 #
-#   share.sh on      forward + masquerade everything leaving phy0-sta0
-#   share.sh off     remove the table
-#   share.sh status  exit 0 when sharing is active
+#   share.sh on [iface]   forward + masquerade everything leaving the station
+#                         netdev (default phy0-sta0)
+#   share.sh off          remove the table
+#   share.sh status       exit 0 when sharing is active
 #
 # 'on' is idempotent: it replaces the table, so it is safe to call after every
 # connect.
 
 TABLE=pwn4c_share
-STA_IFACE=phy0-sta0
+STA_IFACE=${2:-phy0-sta0}
 
 on() {
     sysctl -q -w net.ipv4.ip_forward=1 2>/dev/null
@@ -49,5 +50,5 @@ case "$1" in
     on)     on ;;
     off)    off ;;
     status) status ;;
-    *)      echo "usage: $0 on|off|status" >&2; exit 2 ;;
+    *)      echo "usage: $0 on [iface]|off|status" >&2; exit 2 ;;
 esac

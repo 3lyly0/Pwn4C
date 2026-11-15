@@ -134,6 +134,17 @@ static void scan_json_append_net(char *out, size_t outsz, size_t *off,
         *off += (size_t)n;
     }
 
+    if (net->wps) {
+        n = snprintf(out + *off, outsz - *off,
+                     ",\"wps\":true,\"wps_state\":%u,\"wps_dp_id\":%u,"
+                     "\"wps_config_methods\":%u,\"wps_locked\":%s",
+                     (unsigned)net->wps_state, (unsigned)net->wps_dp_id,
+                     (unsigned)net->wps_config_methods,
+                     net->wps_locked ? "true" : "false");
+        if (n < 0 || (size_t)n >= outsz - *off) { return; }
+        *off += (size_t)n;
+    }
+
     n = snprintf(out + *off, outsz - *off, "}");
     if (n < 0 || (size_t)n >= outsz - *off) { return; }
     *off += (size_t)n;

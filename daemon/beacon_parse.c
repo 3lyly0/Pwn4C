@@ -86,6 +86,63 @@ static void rt_walk(const uint8_t *rt, size_t rt_len,
 /* ── Beacon parsing ───────────────────────────────────────────────────────── */
 
 /*
+ * wsc_parse — Extract WPS facts from a WSC information element.
+ *
+ * Layout: OUI 00:50:f2, OUI type 4, then big-endian
+ * (attribute id, length, value) triples. Only the few attributes a survey
+ * needs are decoded: state, device-password id, config methods, AP locked.
+ */
+static void wsc_parse(const uint8_t *data, size_t len, scan_net_t *out)
+{
+    const uint8_t *p;
+    size_t remain;
+
+    if (!data || len < 4) { return; }
+    if (!(data[0] == 0x00 && data[1] == 0x50 && data[2] == 0xf2
+          && data[3] == 0x04)) {
+        return;
+    }
+
+    out->wps = true;
+    p = data + 4;
+    remain = len - 4;
+
+    while (remain >= 4) {
+        uint16_t type = (uint16_t)((p[0] << 8) | p[1]);
+        uint16_t alen = (uint16_t)((p[2] << 8) | p[3]);
+
+        p += 4;
+        remain -= 4;
+        if (alen > remain) { break; }
+
+        switch (type) {
+        case 0x1044:                        /* WPS state */
+            if (alen >= 1) { out->wps_state = p[0]; }
+            break;
+        case 0x1012:                        /* device password id */
+            if (alen >= 2) {
+                out->wps_dp_id = (uint8_t)((p[0] << 8) | p[1]);
+            }
+            break;
+        case 0x1008:                        /* config methods */
+            if (alen >= 2) {
+                out->wps_config_methods =
+                    (uint16_t)((p[0] << 8) | p[1]);
+            }
+            break;
+        case 0x1057:                        /* AP setup locked */
+            if (alen >= 1) { out->wps_locked = (p[0] & 0x01u) != 0; }
+            break;
+        default:
+            break;
+        }
+
+        p += alen;
+        remain -= alen;
+    }
+}
+
+/*
  * scan_parse_beacon — Parse one RadioTap+802.11 frame into a survey entry.
  * Accepts beacons (subtype 8) and probe responses (subtype 5). Returns 0 on
  * success, -1 when the frame is not a usable AP announcement.
@@ -172,6 +229,9 @@ int scan_parse_beacon(const uint8_t *frame, size_t len,
             /* DS parameter set: direct channel */
             int ch = data[0];
             if (ch >= CHAN_MIN && ch <= 14) { out->channel = ch; }
+        } else if (tag == 0xddu) {
+            /* Vendor specific: WPS/WSC when OUI is 00:50:f2 type 4 */
+            wsc_parse(data, tlen, out);
         }
 
         p += (size_t)2 + tlen;

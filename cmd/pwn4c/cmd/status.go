@@ -57,7 +57,28 @@ var statusCmd = &cobra.Command{
 		fmt.Printf(" Firmware         : %s\n", st.FirmwareVersion)
 		fmt.Printf(" State            : %s\n", st.State)
 		fmt.Printf(" Monitor Active   : %t\n", st.MonitorActive)
+		if st.MonitorActive {
+			fmt.Printf(" Monitor Persist  : %t (ttl %d s)\n", st.MonitorPersist, st.MonitorTTLSec)
+		}
 		fmt.Printf(" Current Channel  : %d\n", st.Channel)
+		if st.APChannel != 0 && st.APChannel != st.Channel {
+			fmt.Printf(" AP Channel       : %d\n", st.APChannel)
+		}
+		if st.STAChannel != 0 {
+			fmt.Printf(" STA Channel      : %d\n", st.STAChannel)
+		}
+		if st.APIface != "" {
+			fmt.Printf(" AP Interface     : %s\n", st.APIface)
+		}
+		if st.STAIface != "" {
+			fmt.Printf(" STA Interface    : %s\n", st.STAIface)
+		}
+		if st.MAC != "" {
+			fmt.Printf(" Radio MAC        : %s\n", st.MAC)
+		}
+		if st.TXPowerDbm != 0 {
+			fmt.Printf(" TX Power         : %d dBm\n", st.TXPowerDbm)
+		}
 		fmt.Printf(" Uptime           : %s\n", uptime.Round(time.Second).String())
 		fmt.Printf(" CPU Temp         : %d °C\n", st.CPUTempCelsius)
 		fmt.Printf(" Free RAM         : %d MB\n", st.FreeRAMBytes/(1024*1024))
@@ -66,6 +87,10 @@ var statusCmd = &cobra.Command{
 		fmt.Printf(" TX Stream Frames : %d\n", st.TxFrames)
 		if st.InjectFrames != nil {
 			fmt.Printf(" Injected Frames  : %d\n", *st.InjectFrames)
+		}
+		if st.InjectRequested != 0 || st.InjectDropped != 0 {
+			fmt.Printf(" Inject Requested : %d\n", st.InjectRequested)
+			fmt.Printf(" Inject Dropped   : %d\n", st.InjectDropped)
 		}
 		fmt.Printf(" Ring Overruns    : %d\n", st.RingOverruns)
 		fmt.Printf(" Inject Failures  : %d\n", st.InjectFailures)

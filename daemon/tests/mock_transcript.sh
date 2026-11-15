@@ -124,9 +124,12 @@ mon = send_cmd({"id": "cmd-4", "command": "START_MONITOR", "params": {"channel":
 assert mon["status"] == "ok" and mon["data"]["monitor_active"] is True
 print("    [assert START_MONITOR ch=6: PASS]")
 
-# Attach BPF filter (matching mock BSSID 02:00:00:de:ad:01)
-flt = send_cmd({"id": "cmd-5", "command": "SET_FILTER", "params": {"mgmt_only": 1, "bssid": "02:00:00:de:ad:01"}})
+# Attach BPF filter (matching mock BSSID 02:00:00:de:ad:01). Send a real
+# JSON boolean here: the Go CLI sends `true`, and json_get_int() used to
+# reject it, silently leaving mgmt_only off.
+flt = send_cmd({"id": "cmd-5", "command": "SET_FILTER", "params": {"mgmt_only": True, "bssid": "02:00:00:de:ad:01"}})
 assert flt["status"] == "ok" and flt["data"]["filter_active"] is True
+assert flt["data"]["mgmt_only"] is True, flt
 print("    [assert SET_FILTER (mgmt_only + bssid): PASS]")
 
 # Start autonomous hopping

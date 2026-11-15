@@ -55,7 +55,7 @@ static void usage(const char *prog)
         "          [--psk <secret>] [--psk-file <path>] [--idle-timeout <sec>]\n"
         "\n"
         "  --mock              Run without hardware (x86_64 development mode)\n"
-        "  --iface IF          Wireless interface (default: wlan0)\n"
+        "  --iface IF          Wireless interface (default: auto-detected)\n"
         "  --eth   IF          Ethernet interface (default: eth0)\n"
         "  --psk   SECRET      Require HMAC-SHA256 PSK authentication on TCP :4444\n"
         "  --psk-file PATH     Read PSK from file (default: /etc/pwn4c.key if present)\n"
@@ -92,9 +92,11 @@ int main(int argc, char *argv[])
     g_daemon.start_sec         = util_monotonic_sec();
     g_daemon.last_activity_sec = g_daemon.start_sec;
 
-    /* Default interface names */
+    /* Default interface names (real names are resolved below) */
     (void)snprintf(g_daemon.wlan_iface, sizeof(g_daemon.wlan_iface),
                    "%s", WLAN_IFACE_DEFAULT);
+    (void)snprintf(g_daemon.sta_iface, sizeof(g_daemon.sta_iface),
+                   "%s", STA_IFACE_DEFAULT);
     (void)snprintf(g_daemon.eth_iface,  sizeof(g_daemon.eth_iface),
                    "%s", ETH_IFACE_DEFAULT);
 
@@ -106,6 +108,7 @@ int main(int argc, char *argv[])
             i++;
             (void)snprintf(g_daemon.wlan_iface, sizeof(g_daemon.wlan_iface),
                            "%s", argv[i]);
+            g_daemon.cli_iface = true;
         } else if (strcmp(argv[i], "--eth") == 0 && i + 1 < argc) {
             i++;
             (void)snprintf(g_daemon.eth_iface, sizeof(g_daemon.eth_iface),
@@ -173,6 +176,19 @@ int main(int argc, char *argv[])
             util_log("main", "cannot read MAC from %s or %s; using fallback",
                      g_daemon.eth_iface, g_daemon.wlan_iface);
         }
+    }
+
+    /*
+     * Resolve the real netdev names and restore the MAC/TX power that the
+     * previous `pwn4c config` run persisted.  Doing this before binding the
+     * control socket means GET_STATUS never reports the stock wlan0 name or
+     * a stale power value.
+     */
+    if (!g_daemon.mock_mode) {
+        (void)radio_detect_ifaces(&g_daemon);
+        (void)radio_apply_persisted(&g_daemon);
+        /* Identity still comes from the Ethernet NIC; this is the wlan MAC. */
+        (void)radio_read_mac(&g_daemon, g_daemon.current_mac);
     }
 
     /* ── Mock mode initialization ───────────────────────────────────────── */
@@ -299,6 +315,18 @@ int main(int argc, char *argv[])
                 ctrl_close_client(&g_daemon);
                 continue;
             }
+        }
+
+        /* ── Monitor session TTL (survives client disconnects) ────────── */
+        if (g_daemon.monitor_deadline_ms > 0
+            && util_monotonic_ms() >= g_daemon.monitor_deadline_ms
+            && (g_daemon.state == STATE_MONITORING
+                || g_daemon.state == STATE_INJECTING
+                || g_daemon.radio_mode == RADIO_MONITOR)) {
+            util_log("main", "monitor TTL (%ds) expired — restoring radio",
+                     g_daemon.monitor_ttl_sec);
+            ctrl_teardown_monitor(&g_daemon);
+            continue;
         }
 
         /* ── Autonomous channel hopping (§3.2) ────────────────────────── */

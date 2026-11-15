@@ -27,9 +27,9 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <ctype.h>
+#include <net/if.h>
 
 #define STA_IFACE          "pwn4c_sta"      /* UCI section name                 */
-#define STA_NETDEV         "phy0-sta0"      /* netdev created by mac80211       */
 #define STA_PHY            "phy0"           /* radio phy (wpa_supplicant ubus)  */
 #define STA_WPA_GLOBAL     "/var/run/wpa_supplicant/global"
 #define STA_CMD_MAX        2048
@@ -116,6 +116,35 @@ static bool sta_is_hex64(const char *s)
 }
 
 /*
+ * sta_netdev_predict — Resolve the station netdev name.
+ *
+ * `phy0-sta0` is only the default.  Netifd names the vif after the phy, and
+ * the name changes if the image uses a different band/phy layout.  Before
+ * `wifi up` the netdev does not exist yet, so predict it from the AP netdev
+ * (`phy0-ap0` -> `phy0-sta0`) instead of guessing a hardcoded string.
+ */
+static const char *sta_netdev_predict(daemon_t *d)
+{
+    static char buf[IFNAMSIZ];
+    const char *cur = radio_sta_netdev(d);
+    const char *p;
+
+    if (cur && cur[0] != '\0' && if_nametoindex(cur) != 0) {
+        return cur;
+    }
+
+    p = strstr(d->wlan_iface, "-ap");
+    if (p != NULL && (size_t)(p - d->wlan_iface) + 5u < sizeof(buf)) {
+        int head = (int)(p - d->wlan_iface);
+        (void)snprintf(buf, sizeof(buf), "%.*s-sta0", head, d->wlan_iface);
+        return buf;
+    }
+
+    if (cur && cur[0] != '\0') { return cur; }
+    return STA_IFACE_DEFAULT;
+}
+
+/*
  * kv_get — Read one "key=value" line from wpa_cli output. `wpa_cli status`
  * returns exactly that format. Values may contain '='; only the first one
  * separates key from value.
@@ -180,22 +209,23 @@ static int sta_channel_from_freq(int freq)
  * (unknown interface/command) is treated as unavailable, as is a missing
  * socket, so callers can move on to another source.
  */
-static int sta_wpa_cmd(const char *cmd, char *out, size_t outsz)
+static int sta_wpa_cmd(const char *ifname, const char *cmd,
+                       char *out, size_t outsz)
 {
     char line[STA_CMD_MAX];
 
-    if (!cmd || !out || outsz == 0) { return -1; }
+    if (!ifname || !cmd || !out || outsz == 0) { return -1; }
 
     (void)snprintf(line, sizeof(line),
                    "wpa_cli -g %s IFNAME=%s %s 2>/dev/null",
-                   STA_WPA_GLOBAL, STA_NETDEV, cmd);
+                   STA_WPA_GLOBAL, ifname, cmd);
     if (util_run_cmd_capture(line, out, outsz, 3) == 0
         && strncmp(out, "FAIL", 4) != 0) {
         return 0;
     }
 
     (void)snprintf(line, sizeof(line),
-                   "wpa_cli -i %s %s 2>/dev/null", STA_NETDEV, cmd);
+                   "wpa_cli -i %s %s 2>/dev/null", ifname, cmd);
     if (util_run_cmd_capture(line, out, outsz, 3) == 0
         && strncmp(out, "FAIL", 4) != 0) {
         return 0;
@@ -206,6 +236,47 @@ static int sta_wpa_cmd(const char *cmd, char *out, size_t outsz)
 }
 
 /*
+ * sta_temp_disabled_reason — Why the supplicant disabled the network.
+ *
+ * `[TEMP-DISABLED]` in `list_networks` only says that wpa_supplicant gave up;
+ * it is set both for a rejected key (reason=WRONG_KEY) and for ordinary
+ * association failures (reason=CONN_FAILED).  The field bug was reporting
+ * every TEMP-DISABLED as a wrong password, sending operators on a wild goose
+ * chase after credentials that were actually correct.
+ *
+ * Returns 0 and fills `reason` ("WRONG_KEY", "CONN_FAILED", ...) when the
+ * logread event is found, -1 when the log has nothing usable.
+ */
+static int sta_temp_disabled_reason(char *reason, size_t reasonsz)
+{
+    char  out[1024];
+    const char *p;
+    size_t i = 0;
+
+    if (!reason || reasonsz == 0) { return -1; }
+    reason[0] = '\0';
+
+    if (util_run_cmd_capture(
+            "logread 2>/dev/null | grep 'CTRL-EVENT-SSID-TEMP-DISABLED' "
+            "| tail -n 1",
+            out, sizeof(out), 3) != 0
+        || out[0] == '\0') {
+        return -1;
+    }
+
+    p = strstr(out, "reason=");
+    if (!p) { return -1; }
+    p += strlen("reason=");
+    while (p[i] != '\0' && p[i] != ' ' && p[i] != '\n'
+           && p[i] != '\r' && i + 1 < reasonsz) {
+        reason[i] = p[i];
+        i++;
+    }
+    reason[i] = '\0';
+    return reason[0] != '\0' ? 0 : -1;
+}
+
+/*
  * sta_wpa_state_ubus — Handshake state from the wpa_supplicant ubus object.
  *
  * Fallback for images built without wpa-cli. `phy_status` reports the
@@ -213,13 +284,14 @@ static int sta_wpa_cmd(const char *cmd, char *out, size_t outsz)
  * frequency. The reply also names the interface; ignore it when it is not the
  * station netdev so a phy shared with the AP cannot be misread.
  */
-static int sta_wpa_state_ubus(char *state, size_t statesz, int *freq)
+static int sta_wpa_state_ubus(const char *netdev, char *state,
+                              size_t statesz, int *freq)
 {
     char obj[512];
     char ifname[32];
 
     if (freq) { *freq = 0; }
-    if (!state || statesz == 0) { return -1; }
+    if (!netdev || !state || statesz == 0) { return -1; }
     state[0] = '\0';
 
     if (util_run_cmd_capture(
@@ -232,7 +304,7 @@ static int sta_wpa_state_ubus(char *state, size_t statesz, int *freq)
     }
 
     if (json_get_str(obj, "ifname", ifname, sizeof(ifname)) == 0
-        && ifname[0] != '\0' && strcmp(ifname, STA_NETDEV) != 0) {
+        && ifname[0] != '\0' && strcmp(ifname, netdev) != 0) {
         state[0] = '\0';
         return -1;
     }
@@ -263,17 +335,37 @@ static int sta_wpa_state_ubus(char *state, size_t statesz, int *freq)
  * without this the drone routes out but replies to forwarded packets are lost.
  */
 int wifi_sta_connect(daemon_t *d, const char *ssid, const char *psk,
-                     const char *bssid, const char *encryption, bool share)
+                     const char *bssid, const char *encryption,
+                     const char *mac, bool share)
 {
     char cmd[STA_CMD_MAX];
     char q_ssid[SCAN_SSID_MAX * 5 + 8];
     char q_key[64 * 5 + 8];
     char key[80];
     char enc[32];
+    char sta_mac[18];
+    const char *netdev;
     size_t psk_len = 0;
     bool open_net = false;
 
     if (!ssid || ssid[0] == '\0' || strlen(ssid) > SCAN_SSID_MAX) { return -1; }
+
+    /*
+     * The station netdev does not exist before `wifi up`; predict its name
+     * from the AP netdev so the wait/DHCP loops look at the right interface.
+     */
+    netdev = sta_netdev_predict(d);
+
+    /* Optional per-connection MAC, applied by netifd from the profile. */
+    sta_mac[0] = '\0';
+    if (mac && mac[0] != '\0') {
+        uint8_t parsed[6];
+        if (util_parse_mac(mac, parsed) < 0) {
+            util_log("sta", "WIFI_CONNECT: malformed mac '%s'", mac);
+            return -1;
+        }
+        util_mac_to_str(parsed, sta_mac, sizeof(sta_mac));
+    }
 
     if (psk && psk[0] != '\0') {
         psk_len = strlen(psk);
@@ -369,6 +461,14 @@ int wifi_sta_connect(daemon_t *d, const char *ssid, const char *psk,
         }
     }
 
+    if (sta_mac[0] != '\0') {
+        if (cmd_append(cmd, sizeof(cmd),
+                "; uci set wireless.%s.macaddr='%s'",
+                STA_IFACE, sta_mac) < 0) {
+            return -1;
+        }
+    }
+
     /*
      * Ordering matters:
      *   1. commit the new profile/network config
@@ -405,7 +505,7 @@ int wifi_sta_connect(daemon_t *d, const char *ssid, const char *psk,
             "if ! ip -4 addr show dev %s 2>/dev/null | grep -q 'inet '; then "
             "ifdown wan 2>/dev/null; sleep 1; ifup wan 2>/dev/null; fi; "
             "true",
-            STA_NETDEV, STA_NETDEV, STA_NETDEV, STA_NETDEV) < 0) {
+            netdev, netdev, netdev, netdev) < 0) {
         return -1;
     }
 
@@ -428,7 +528,10 @@ int wifi_sta_connect(daemon_t *d, const char *ssid, const char *psk,
      * drone still has upstream connectivity, only the LAN stops routing out.
      */
     if (share) {
-        if (util_run_cmd_timeout(SHARE_CMD " on", 10) != 0) {
+        char sharecmd[160];
+
+        (void)snprintf(sharecmd, sizeof(sharecmd), SHARE_CMD " on %s", netdev);
+        if (util_run_cmd_timeout(sharecmd, 10) != 0) {
             util_log("sta", "WIFI_CONNECT: sharing failed (nft missing or no netfilter)");
         }
     }
@@ -471,12 +574,16 @@ int wifi_sta_status(daemon_t *d, char *out_json, size_t outsz)
     char kv_ssid[SCAN_SSID_MAX + 1] = "";
     char kv_bssid[18] = "";
     char kv_freq[16] = "";
+    char error_detail[32] = "";
+    const char *error_code = "";
+    const char *netdev = radio_sta_netdev(d);
     bool iw_assoc = false;
     bool wpa_available = false;
     bool wpa_cli_ok = false;
     bool authenticated = false;
     bool associated = false;
     bool auth_failed = false;
+    bool connect_failed = false;
     bool connected = false;
     bool sharing = false;
     const char *state = "disconnected";
@@ -525,7 +632,7 @@ int wifi_sta_status(daemon_t *d, char *out_json, size_t outsz)
      *    queried through its global control socket (see sta_wpa_cmd), with
      *    the ubus object as a fallback on images without wpa-cli.
      */
-    if (sta_wpa_cmd("status", wpa, sizeof(wpa)) == 0
+    if (sta_wpa_cmd(netdev, "status", wpa, sizeof(wpa)) == 0
         && kv_get(wpa, "wpa_state", wpa_state, sizeof(wpa_state)) == 0) {
         wpa_cli_ok = true;
         wpa_available = true;
@@ -533,7 +640,8 @@ int wifi_sta_status(daemon_t *d, char *out_json, size_t outsz)
         int ubus_freq = 0;
 
         wpa[0] = '\0';
-        if (sta_wpa_state_ubus(wpa_state, sizeof(wpa_state), &ubus_freq) == 0) {
+        if (sta_wpa_state_ubus(netdev, wpa_state, sizeof(wpa_state),
+                               &ubus_freq) == 0) {
             wpa_available = true;
             if (channel == 0 && ubus_freq > 0) {
                 channel = sta_channel_from_freq(ubus_freq);
@@ -564,16 +672,32 @@ int wifi_sta_status(daemon_t *d, char *out_json, size_t outsz)
                   || strcmp(wpa_state, "AUTHENTICATING") == 0;
 
         /*
-         * After repeated 4-way failures (WRONG_KEY) wpa_supplicant marks the
-         * network [TEMP-DISABLED]; it then stops retrying until the network is
-         * re-enabled or the supplicant restarts. Surface that as a hard auth
-         * error instead of a generic "not connected".
+         * After repeated 4-way failures wpa_supplicant marks the network
+         * [TEMP-DISABLED]; it then stops retrying until the network is
+         * re-enabled or the supplicant restarts.  Do not assume a wrong key:
+         * `reason=WRONG_KEY` means the AP rejected the PSK, while
+         * `reason=CONN_FAILED` is an association/timeout problem.  Surface
+         * the real reason so the operator fixes the right thing.
          */
         if (!authenticated
-            && sta_wpa_cmd("list_networks", nets, sizeof(nets)) == 0
+            && sta_wpa_cmd(netdev, "list_networks", nets, sizeof(nets)) == 0
             && strstr(nets, "[TEMP-DISABLED]") != NULL) {
-            auth_failed = true;
+            char reason[24] = "";
+
             associated = false;
+            if (sta_temp_disabled_reason(reason, sizeof(reason)) == 0) {
+                (void)snprintf(error_detail, sizeof(error_detail), "%s", reason);
+                if (strcmp(reason, "WRONG_KEY") == 0) {
+                    auth_failed = true;
+                } else {
+                    connect_failed = true;
+                }
+            } else {
+                /* Unknown cause: report it as such, not as a bad password. */
+                (void)snprintf(error_detail, sizeof(error_detail),
+                               "TEMP_DISABLED");
+                connect_failed = true;
+            }
         }
     } else {
         /* No supplicant control channel: association from iw only. */
@@ -582,17 +706,22 @@ int wifi_sta_status(daemon_t *d, char *out_json, size_t outsz)
     }
 
     /* 3. DHCP address on the station interface (fallback: ifstatus wan) */
-    if (util_run_cmd_capture("ip -4 addr show dev " STA_NETDEV " 2>/dev/null",
-                             wan, sizeof(wan), 3) == 0) {
-        const char *p = strstr(wan, "inet ");
-        if (p) {
-            size_t i = 0;
-            p += strlen("inet ");
-            while (p[i] != '\0' && p[i] != '/' && p[i] != ' ' && i + 1 < sizeof(ip_str)) {
-                ip_str[i] = p[i];
-                i++;
+    {
+        char dcmd[96];
+        (void)snprintf(dcmd, sizeof(dcmd),
+                       "ip -4 addr show dev %s 2>/dev/null", netdev);
+        if (util_run_cmd_capture(dcmd, wan, sizeof(wan), 3) == 0) {
+            const char *p = strstr(wan, "inet ");
+            if (p) {
+                size_t i = 0;
+                p += strlen("inet ");
+                while (p[i] != '\0' && p[i] != '/' && p[i] != ' '
+                       && i + 1 < sizeof(ip_str)) {
+                    ip_str[i] = p[i];
+                    i++;
+                }
+                ip_str[i] = '\0';
             }
-            ip_str[i] = '\0';
         }
     }
     if (ip_str[0] == '\0' && util_run_cmd_capture("ifstatus wan 2>/dev/null",
@@ -607,6 +736,11 @@ int wifi_sta_status(daemon_t *d, char *out_json, size_t outsz)
     if (auth_failed) {
         connected = false;
         state = "auth_failed";
+        error_code = "auth_failed";
+    } else if (connect_failed) {
+        connected = false;
+        state = "connect_failed";
+        error_code = "connect_failed";
     } else if (wpa_available) {
         connected = authenticated;
         if (authenticated && ip_str[0] != '\0') {
@@ -630,7 +764,8 @@ int wifi_sta_status(daemon_t *d, char *out_json, size_t outsz)
         (void)snprintf(out_json, outsz,
             "{\"connected\":%s,\"associated\":%s,\"ssid\":\"%s\","
             "\"bssid\":\"%s\",\"ip\":\"%s\",\"channel\":%d,\"mode\":\"sta\","
-            "\"state\":\"%s\",\"error\":\"%s\",\"wpa_state\":\"%s\","
+            "\"iface\":\"%s\",\"state\":\"%s\",\"error\":\"%s\","
+            "\"error_detail\":\"%s\",\"wpa_state\":\"%s\","
             "\"sharing\":%s}",
             connected ? "true" : "false",
             associated ? "true" : "false",
@@ -638,8 +773,10 @@ int wifi_sta_status(daemon_t *d, char *out_json, size_t outsz)
             bssid_str,
             ip_str,
             channel,
+            netdev,
             state,
-            auth_failed ? "auth_failed" : "",
+            error_code,
+            error_detail,
             wpa_state,
             sharing ? "true" : "false");
     }
@@ -657,8 +794,10 @@ int wifi_sta_status(daemon_t *d, char *out_json, size_t outsz)
 int wifi_sta_disconnect(daemon_t *d)
 {
     int r;
+    char cmd[512];
+    const char *netdev = radio_sta_netdev(d);
 
-    char cmd[] =
+    (void)snprintf(cmd, sizeof(cmd),
         SHARE_CMD " off; "
         "killall udhcpc 2>/dev/null; "
         "ifdown wan 2>/dev/null; "
@@ -671,8 +810,9 @@ int wifi_sta_disconnect(daemon_t *d)
         "uci commit wireless; "
         "uci commit network; "
         "wifi down 2>/dev/null; "
-        "ip link set wlan0 down 2>/dev/null; "
-        "true";
+        "ip link set %s down 2>/dev/null; "
+        "true",
+        netdev);
 
     if (d->state == STATE_MONITORING || d->state == STATE_INJECTING) {
         ctrl_teardown_monitor(d);

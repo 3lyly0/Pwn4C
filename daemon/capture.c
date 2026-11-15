@@ -233,6 +233,20 @@ void capture_close(daemon_t *d)
  * BPF packet loads are big-endian.  Compose the value manually so that X points
  * at the exact 802.11 header start even for extended RadioTap headers (>255 B).
  */
+/*
+ * Program layout (all conditional branches use JEQ + a patched JA so the
+ * forward targets can be resolved after the whole program is emitted):
+ *
+ *   X = radiotap it_len
+ *   [mgmt_only]  type != mgmt              -> reject
+ *   [bssid]      mgmt subtype 4 + Addr1 ff -> accept   (undirected probe req)
+ *   [bssid]      Addr1/2/3 == BSSID        -> accept
+ *   otherwise                               -> reject
+ *
+ * Probe requests are the reason a BSSID-filtered capture looked dead: they
+ * are management frames with a broadcast Addr1/Addr3, so the old three-address
+ * check dropped every one of them before userspace ever saw it.
+ */
 int capture_build_bpf(bool mgmt_only, const uint8_t *bssid,
                       struct sock_filter *insns, unsigned short max_insns,
                       unsigned short *len_out)
@@ -240,42 +254,91 @@ int capture_build_bpf(bool mgmt_only, const uint8_t *bssid,
     unsigned short pc = 0;
     uint32_t       bssid_hi = 0;
     uint32_t       bssid_lo = 0;
-    unsigned short addr_jumps[4];  /* type check + 3 address checks */
-    unsigned short addr_count = 0;
+    unsigned short ja_accept[8];
+    unsigned short ja_reject[8];
+    unsigned short ja_bssid[8];
+    int            n_accept = 0;
+    int            n_reject = 0;
+    int            n_bssid  = 0;
+    unsigned short bssid_pc = 0;
+    unsigned short mgmt_jeq = 0;
+    bool           has_mgmt_jeq = false;
     unsigned short accept_pc;
     unsigned short reject_pc;
     unsigned short i;
 
-    if (!insns || !len_out || max_insns < 28u) { return -1; }
+    if (!insns || !len_out || max_insns < 48u) { return -1; }
     *len_out = 0;
 
     if (!mgmt_only && !bssid) { return 0; }
+
+/*
+ * Emit one instruction, fatally failing the build if the caller's buffer is
+ * too small (a truncated BPF program is worse than no filter).
+ */
+#define BPF_EMIT(stmt) do { \
+    struct sock_filter _bpfi = stmt; \
+    if (pc >= max_insns) { return -1; } \
+    insns[pc++] = _bpfi; \
+} while (0)
+
+#define BPF_FWD_JA(list, n) do { \
+    if ((n) >= 8) { return -1; } \
+    (list)[(n)++] = pc; \
+    BPF_EMIT(BPF_STMT(BPF_JMP | BPF_JA, 0)); \
+} while (0)
 
     /*
      * Classic BPF loads are big-endian; RadioTap it_len is little-endian, so
      * assemble it as (byte[3] << 8) | byte[2] and put it in X.  X then points
      * at the 802.11 Frame Control field, independent of host endianness.
      */
-    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 3);
-    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_ALU | BPF_LSH | BPF_K, 8);
-    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_MISC | BPF_TAX, 0);
-    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 2);
-    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_ALU | BPF_OR | BPF_X, 0);
-    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_MISC | BPF_TAX, 0); /* X = it_len */
+    BPF_EMIT(BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 3));
+    BPF_EMIT(BPF_STMT(BPF_ALU | BPF_LSH | BPF_K, 8));
+    BPF_EMIT(BPF_STMT(BPF_MISC | BPF_TAX, 0));
+    BPF_EMIT(BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 2));
+    BPF_EMIT(BPF_STMT(BPF_ALU | BPF_OR | BPF_X, 0));
+    BPF_EMIT(BPF_STMT(BPF_MISC | BPF_TAX, 0)); /* X = it_len */
 
     if (mgmt_only) {
         /* Reject anything whose Frame Control Type bits are not Management */
-        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_B | BPF_IND, 0);
-        insns[pc++] = (struct sock_filter)BPF_STMT(BPF_ALU | BPF_AND | BPF_K, 0x0c);
-        insns[pc++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x00, 0, 0);
-        /* jf patched below to the reject instruction */
-        addr_jumps[addr_count++] = (unsigned short)(pc - 1u);
+        BPF_EMIT(BPF_STMT(BPF_LD | BPF_B | BPF_IND, 0));
+        BPF_EMIT(BPF_STMT(BPF_ALU | BPF_AND | BPF_K, 0x0c));
+        mgmt_jeq = pc;
+        has_mgmt_jeq = (bssid == NULL);
+        /* With a BSSID filter, match falls through to the address checks. */
+        BPF_EMIT(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x00,
+                          bssid ? 1 : 0, 0));
+        BPF_FWD_JA(ja_reject, n_reject);
     }
 
     if (bssid) {
+        /* Undirected probe requests: mgmt subtype 4, Addr1 broadcast. */
+        BPF_EMIT(BPF_STMT(BPF_LD | BPF_B | BPF_IND, 0));
+        BPF_EMIT(BPF_STMT(BPF_ALU | BPF_AND | BPF_K, 0x0c));
+        BPF_EMIT(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x00, 1, 0));
+        BPF_FWD_JA(ja_bssid, n_bssid);          /* non-mgmt: normal address check */
+
+        BPF_EMIT(BPF_STMT(BPF_LD | BPF_B | BPF_IND, 0));
+        BPF_EMIT(BPF_STMT(BPF_ALU | BPF_AND | BPF_K, 0xf0));
+        BPF_EMIT(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x40, 1, 0));
+        BPF_FWD_JA(ja_bssid, n_bssid);          /* not a probe request */
+
+        BPF_EMIT(BPF_STMT(BPF_LD | BPF_W | BPF_IND, 4));
+        BPF_EMIT(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0xffffffffu, 1, 0));
+        BPF_FWD_JA(ja_bssid, n_bssid);          /* directed probe request */
+
+        BPF_EMIT(BPF_STMT(BPF_LD | BPF_H | BPF_IND, 8));
+        BPF_EMIT(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0xffffu, 1, 0));
+        BPF_FWD_JA(ja_bssid, n_bssid);
+
+        BPF_FWD_JA(ja_accept, n_accept);        /* broadcast probe request */
+
+        bssid_pc = pc;
+
         /* Match BSSID against Addr1 (X+4), Addr2 (X+10) and Addr3 (X+16).
          * Addr3 is the BSSID for Management frames; Data/EAPOL frames carry
-         * the BSSID in Addr1 (ToDS) or Addr2 (FromDS), so all three must be
+         * the BSSID in Addr1 (ToDS) or Addr2 (FromDS), so all three are
          * checked to preserve handshake/data traffic. */
         static const unsigned short addr_offsets[3] = { 4u, 10u, 16u };
 
@@ -289,17 +352,19 @@ int capture_build_bpf(bool mgmt_only, const uint8_t *bssid,
         for (i = 0; i < 3u; i++) {
             unsigned short off = addr_offsets[i];
 
-            insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_IND, off);
-            /* No match -> skip the 2-instruction low-half check (next block) */
-            insns[pc++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
-                                                       bssid_hi, 0, 2);
-            insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_H | BPF_IND,
-                                                       (unsigned short)(off + 4u));
-            /* Match -> jump to accept (patched after program is complete) */
-            insns[pc++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
-                                                       bssid_lo, 0, 0);
-            addr_jumps[addr_count++] = (unsigned short)(pc - 1u);
+            BPF_EMIT(BPF_STMT(BPF_LD | BPF_W | BPF_IND, off));
+            /* No match -> skip the low-half check (JA k=3 lands after it) */
+            BPF_EMIT(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, bssid_hi, 1, 0));
+            BPF_EMIT(BPF_STMT(BPF_JMP | BPF_JA, 3));
+
+            BPF_EMIT(BPF_STMT(BPF_LD | BPF_H | BPF_IND,
+                              (unsigned short)(off + 4u)));
+            /* No match -> skip the accept jump that follows */
+            BPF_EMIT(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, bssid_lo, 0, 1));
+            BPF_FWD_JA(ja_accept, n_accept);
         }
+
+        BPF_FWD_JA(ja_reject, n_reject);
     }
 
     if (pc == 6u) {
@@ -307,33 +372,30 @@ int capture_build_bpf(bool mgmt_only, const uint8_t *bssid,
     }
 
     reject_pc = pc;
-    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, 0);
+    BPF_EMIT(BPF_STMT(BPF_RET | BPF_K, 0));
     accept_pc = pc;
-    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, 65535);
+    BPF_EMIT(BPF_STMT(BPF_RET | BPF_K, 65535));
 
-    /* Patch jumps: match -> accept, non-management -> reject */
-    for (i = 0; i < addr_count; i++) {
-        unsigned short at = addr_jumps[i];
-
-        if (i == 0u && mgmt_only) {
-            if (bssid) {
-                /* Management frames fall through to the address blocks;
-                 * anything else jumps straight to reject. */
-                insns[at].jt = 0;
-                insns[at].jf = (uint8_t)(reject_pc - at - 1u);
-            } else {
-                /* Type-only filter: match -> accept, else fall to reject. */
-                insns[at].jt = (uint8_t)(accept_pc - at - 1u);
-                insns[at].jf = 0;
-            }
-        } else {
-            insns[at].jt = (uint8_t)(accept_pc - at - 1u);
-            insns[at].jf = 0;
-        }
+    /* Resolve every forward jump now that labels are known. */
+    if (has_mgmt_jeq) {
+        insns[mgmt_jeq].jt = (uint8_t)(accept_pc - mgmt_jeq - 1u);
+        insns[mgmt_jeq].jf = (uint8_t)(reject_pc - mgmt_jeq - 1u);
+    }
+    for (i = 0; i < (unsigned short)n_accept; i++) {
+        insns[ja_accept[i]].k = (uint32_t)(accept_pc - ja_accept[i] - 1u);
+    }
+    for (i = 0; i < (unsigned short)n_reject; i++) {
+        insns[ja_reject[i]].k = (uint32_t)(reject_pc - ja_reject[i] - 1u);
+    }
+    for (i = 0; i < (unsigned short)n_bssid; i++) {
+        insns[ja_bssid[i]].k = (uint32_t)(bssid_pc - ja_bssid[i] - 1u);
     }
 
     *len_out = pc;
     return 0;
+
+#undef BPF_EMIT
+#undef BPF_FWD_JA
 }
 
 /*
@@ -342,7 +404,7 @@ int capture_build_bpf(bool mgmt_only, const uint8_t *bssid,
  */
 int capture_set_filter(daemon_t *d, bool mgmt_only, const uint8_t *bssid)
 {
-    struct sock_filter insns[32];
+    struct sock_filter insns[64];
     unsigned short     pc = 0;
     struct sock_fprog  prog;
 
@@ -367,7 +429,7 @@ int capture_set_filter(daemon_t *d, bool mgmt_only, const uint8_t *bssid)
     }
 
     if (capture_build_bpf(mgmt_only, d->filter_bssid_set ? d->filter_bssid : NULL,
-                          insns, 32u, &pc) < 0 || pc == 0) {
+                          insns, 64u, &pc) < 0 || pc == 0) {
         util_log("capture", "BPF filter build failed");
         return -1;
     }
