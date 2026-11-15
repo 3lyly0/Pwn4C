@@ -3,6 +3,34 @@
 All notable changes to Pwn4C are documented here. For releases prior to
 v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
 
+## [Unreleased]
+
+### Added
+- **Handshake harvesting (`pwn4c harvest`)**: the drone now decodes EAPOL-Key
+  frames in real time instead of leaving handshake hunting to a PCAP
+  post-mortem. A standalone parser (`daemon/eapol_parse.c`) classifies M1-M4,
+  extracts the ANonce/SNonce, MIC, replay counter and the RSN PMKID KDE, and
+  feeds a bounded 16-slot `(BSSID, STA)` table (`daemon/handshake.c`) that also
+  caches `BSSID -> SSID` from beacons. `pwn4c harvest` polls the new
+  `GET_HANDSHAKES` command, stops as soon as a crackable unit exists, and writes
+  hashcat mode-22000 lines — both `WPA*01*` (PMKID) and `WPA*02*` (M1+M2,
+  M1+M4, M3+M2, M3+M4). `--deauth` optionally kicks clients first, and
+  `--all` keeps collecting until `--timeout`.
+- **`GET_HANDSHAKES` control command**: pages through ready units (six per
+  page, keeping responses inside the 8 KB line limit), accepts `{"reset":true}`
+  to clear the table, and survives `STOP_MONITOR` so results can be collected
+  after the radio is restored.
+- **Mock and test coverage**: the daemon injects a synthetic beacon plus one
+  PMKID unit and one M1+M2 unit in mock mode, `tests/test_eapol.c` covers the
+  parser and table (48 assertions), and `internal/drone/handshake_test.go`
+  pins the hashcat line format.
+- **`harvest` in the interactive shell**: menu entry 9 captures a handshake or
+  PMKID for the selected network (or a channel you type), optionally sends a
+  deauth kick, and writes the same hashcat file — reusing the CLI's polling and
+  writer, without leaving the session. Both paths also clear any BSSID frame
+  filter left behind by an earlier `listen`, which would otherwise hide the
+  beacons needed for the ESSID.
+
 ## [1.5.0] - 2026-11-15
 
 ### Fixed

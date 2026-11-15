@@ -365,6 +365,45 @@ int     scan_run(daemon_t *d, int dwell_ms, char *out_json, size_t out_sz);
 int     scan_parse_beacon(const uint8_t *frame, size_t len,
                           int fallback_channel, scan_net_t *out);
 
+/* ── EAPOL-Key capture (harvest) ──────────────────────────────────────────── */
+/* The 4-way handshake is tiny (95-byte body plus key data), so 256 bytes per
+ * side is plenty even for M1 frames carrying a PMKID KDE and RSN IEs. */
+#define HS_EAPOL_MAX        256u    /* max EAPOL-Key bytes kept per side   */
+#define HS_MAX_PAIRS        16u     /* concurrent (BSSID, STA) slots       */
+#define HS_MAX_BSSIDS       16u     /* BSSID -> SSID cache entries         */
+#define HS_JSON_PAIRS       6u      /* ready pairs per GET_HANDSHAKES page */
+
+/*
+ * eapol_msg_t — one decoded EAPOL-Key frame.
+ *
+ * `eapol` borrows the caller's capture buffer; it is only valid until the
+ * next recv().  Consumers that keep the frame (handshake.c) must copy it.
+ */
+typedef struct {
+    uint8_t        msg;        /* 1..4; 0 when not a pairwise EAPOL-Key     */
+    uint8_t        bssid[6];
+    uint8_t        sta[6];
+    uint16_t       key_info;
+    uint8_t        replay[8];  /* big-endian replay counter as received     */
+    uint8_t        nonce[32];  /* ANonce for M1/M3, SNonce for M2/M4        */
+    uint8_t        mic[16];
+    uint8_t        pmkid[16];
+    bool           has_pmkid;
+    uint16_t       eapol_len;
+    const uint8_t *eapol;      /* start of the EAPOL header, not LLC/SNAP   */
+} eapol_msg_t;
+
+/* eapol_parse.c */
+int     eapol_parse_frame(const uint8_t *frame, size_t len, eapol_msg_t *out);
+
+/* handshake.c */
+void        hs_reset(void);
+void        hs_observe(daemon_t *d, const uint8_t *frame, size_t len);
+void        hs_mock_inject(daemon_t *d);
+int         hs_ready_count(void);
+/* Serialise up to HS_JSON_PAIRS ready pairs into a static buffer. */
+const char *hs_report(int offset, bool reset, int *total_out);
+
 /* wifi_sta.c — managed station mode (WIFI_CONNECT / STATUS / DISCONNECT)   */
 int     wifi_sta_connect(daemon_t *d, const char *ssid, const char *psk,
                          const char *bssid, const char *encryption,

@@ -54,7 +54,10 @@ graph LR
 - Respond to UDP autodiscovery beacons.
 - Expose an emergency Dropbear SSH server on TCP port 22 for out-of-band recovery.
 
-The Drone performs zero frame analysis. It is a dumb RF transceiver controlled entirely by the Host.
+The Drone performs no attack logic. Its only frame analysis is the bounded
+EAPOL-Key decoding (plus the SSID extraction it shares with the survey parser)
+that feeds the handshake table behind `GET_HANDSHAKES`; formatting, cracking and
+scheduling all happen on the Host.
 
 ### Host Responsibilities
 
@@ -62,7 +65,8 @@ The Drone performs zero frame analysis. It is a dumb RF transceiver controlled e
 - Discover the Drone on the local Ethernet segment via UDP broadcast.
 - Issue operational commands (channel selection, monitor start/stop, injection dispatch) over TCP.
 - Receive, buffer, and write PCAP captures streamed from the Drone.
-- Run all attack logic, handshake analysis, and deauthentication scheduling.
+- Run all attack logic and deauthentication scheduling, and turn harvested
+  handshakes/PMKIDs into hashcat mode-22000 lines (`pwn4c harvest`).
 - Check for firmware updates via the GitHub Releases API and orchestrate local reflashing.
 
 ---
@@ -245,6 +249,8 @@ See [api_reference.md](api_reference.md#udp-frame-stream-format) for byte-level 
 **Capture Ring Buffer**: Fixed 512KB circular buffer in user-space. The wireless interface (in monitor mode) delivers frames via a raw socket. The ring buffer absorbs burst traffic and feeds the Frame Streamer. When full, oldest frames are silently dropped and a `BUFFER_OVERFLOW` event is pushed to the control channel. The injection queue is separate: 256 slots of 1024 bytes, paced by `interval_ms`, with the depth reported in `GET_STATUS`.
 
 **Frame Streamer**: Reads frames from the ring buffer, prepends the 16-byte stream header, sends UDP datagrams to the Host's IP (learned from the TCP connection's peer address). Fragmentation logic splits frames exceeding 1472 bytes (1500 MTU minus 20 IP minus 8 UDP overhead).
+
+**Handshake Harvester**: Every frame delivered by the capture socket passes through a standalone EAPOL-Key parser (`eapol_parse.c`, no daemon state, no allocation) before it enters the ring, so a full ring or a slow client cannot hide an exchange. Decoded messages update a bounded table of 16 `(BSSID, STA)` slots (`handshake.c`): an AP-side message supplies the ANonce and, when the AP includes the RSN PMKID KDE, the PMKID; a client-side message supplies the MIC and the client's verbatim EAPOL frame. A small `BSSID -> SSID` cache is filled from beacons and probe responses because hashcat mode 22000 needs the ESSID. `GET_HANDSHAKES` reports only ready units, six per page. The table is reset by `START_MONITOR` but survives `STOP_MONITOR`, so the host can stop the radio and still collect the result.
 
 **Wireless Interface Manager**: Abstraction layer over `iw` and `ip link`. Manages monitor mode transitions, channel switching, TX power, and MAC randomization. Wraps `system()` calls with 2-second timeout enforcement to prevent daemon hangs from unresponsive drivers. MAC and TX-power changes are persisted to UCI and read back from the driver, so the daemon reports what the hardware actually applied.
 

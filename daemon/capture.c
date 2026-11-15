@@ -504,6 +504,9 @@ int capture_read_frame(daemon_t *d)
             return -1;
         }
         ring_push_frame(d, MOCK_FRAME, (uint16_t)MOCK_FRAME_LEN);
+        /* Feed one canned 4-way handshake through the real parser so the
+         * harvest path is exercised end-to-end without a radio. */
+        hs_mock_inject(d);
         return 1;
     }
 
@@ -527,6 +530,10 @@ int capture_read_frame(daemon_t *d)
         /* Too short to be a valid RadioTap + 802.11 frame; discard */
         return 0;
     }
+
+    /* Handshake harvesting sees every frame before it enters the ring, so a
+     * full ring or a slow control client cannot hide an EAPOL exchange. */
+    hs_observe(d, frame_buf, (size_t)n);
 
     ring_push_frame(d, frame_buf, (uint16_t)n);
     return 1;

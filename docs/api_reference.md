@@ -765,6 +765,123 @@ Returns detailed system diagnostics for debugging.
 
 ---
 
+#### `GET_HANDSHAKES` (Pwn4C extension)
+
+Reports the crackable units the daemon has decoded from the live capture. The
+daemon parses EAPOL-Key frames as they arrive and keeps a bounded table of
+`(BSSID, STA)` pairs (16 slots) plus a small `BSSID -> SSID` cache learned from
+beacons and probe responses. Only **ready** units are listed:
+
+- a complete pair — an AP-side message (M1 or M3) and a client-side message
+  (M2 or M4) for the same pair, which yields an ANonce and a MIC; or
+- a **PMKID** lifted from an M1 key-data KDE, which cracks on its own.
+
+The table is cleared by `START_MONITOR` (and by `"reset": true`), but it
+**survives `STOP_MONITOR`**, so a client may stop the radio and still collect
+what was captured. The daemon reports facts only; the host turns them into
+hashcat mode-22000 lines.
+
+**Request:**
+
+```json
+{
+  "id": "cmd-020",
+  "command": "GET_HANDSHAKES",
+  "params": { "offset": 0 }
+}
+```
+
+**Parameters:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `offset` | integer | No | Index of the first ready unit to return (default `0`) |
+| `reset` | boolean | No | Clear the table before answering |
+
+**Response:**
+
+```json
+{
+  "id": "cmd-020",
+  "status": "ok",
+  "data": {
+    "count": 2,
+    "tracked": 3,
+    "offset": 0,
+    "returned": 2,
+    "truncated": false,
+    "handshakes": [
+      {
+        "bssid": "AA:BB:CC:DD:EE:FF",
+        "sta": "12:22:33:44:55:66",
+        "ssid": "lab",
+        "ssid_len": 3,
+        "ssid_hex": "6c6162",
+        "message_pair": 0,
+        "frames": 4,
+        "anonce": "a1a1…a1",
+        "mic": "1111…11",
+        "pmkid": "",
+        "eapol": "0203005f02010a…",
+        "eapol_len": 99
+      },
+      {
+        "bssid": "AA:BB:CC:DD:EE:FF",
+        "sta": "12:22:33:44:55:77",
+        "ssid": "lab",
+        "ssid_len": 3,
+        "ssid_hex": "6c6162",
+        "message_pair": -1,
+        "frames": 1,
+        "anonce": "c5c5…c5",
+        "mic": "",
+        "pmkid": "5a5a…5a",
+        "eapol": "",
+        "eapol_len": 0
+      }
+    ]
+  }
+}
+```
+
+**Data fields:**
+
+| Field | Type | Description |
+|---|---|---|
+| `count` | integer | Total ready units in the table |
+| `tracked` | integer | Occupied `(BSSID, STA)` slots, ready or not |
+| `offset` | integer | Offset this page starts at (clamped to `count`) |
+| `returned` | integer | Units in this page (at most 6) |
+| `truncated` | boolean | More units exist past this page; request `offset + returned` |
+| `handshakes[].bssid` | string | AP MAC, colon-separated |
+| `handshakes[].sta` | string | Client MAC, colon-separated |
+| `handshakes[].ssid` | string | Learned ESSID, JSON-escaped (`""` when no beacon was seen) |
+| `handshakes[].ssid_len` | integer | ESSID length in bytes |
+| `handshakes[].ssid_hex` | string | ESSID as lowercase hex — use this for binary SSIDs |
+| `handshakes[].message_pair` | integer | `0`=M1+M2, `1`=M1+M4, `2`=M3+M2, `3`=M3+M4, `-1`=PMKID only |
+| `handshakes[].frames` | integer | EAPOL frames observed for this pair |
+| `handshakes[].anonce` | string | AP nonce, 64 hex chars (`""` when no AP message) |
+| `handshakes[].mic` | string | Client MIC, 32 hex chars (`""` when no client message) |
+| `handshakes[].pmkid` | string | PMKID, 32 hex chars (`""` when absent) |
+| `handshakes[].eapol` | string | The client's EAPOL frame, verbatim, as hex |
+| `handshakes[].eapol_len` | integer | Byte length of `eapol` |
+
+**Paging and size:** a response is capped at 6 units so it stays well inside
+the 8 KB control-channel line limit (`JSON_BUF_LEN`). Poll with
+`offset += returned` while `truncated` is `true`.
+
+**Hashcat mapping** (performed by `pwn4c harvest`, not the daemon):
+
+```
+PMKID     : WPA*01*<pmkid>*<ap>*<sta>*<essid_hex>***
+Handshake : WPA*02*<mic>*<ap>*<sta>*<essid_hex>*<anonce>*<eapol>*<message_pair>
+```
+
+MACs are 12 lowercase hex characters with no separators. A unit without an
+ESSID cannot be rendered: hashcat mode 22000 requires it.
+
+---
+
 #### `WIFI_SCAN` (Pwn4C extension)
 
 Surveys nearby access points from the monitor radio without touching the

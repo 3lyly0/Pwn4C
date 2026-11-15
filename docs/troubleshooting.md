@@ -472,6 +472,65 @@ partition may be too small. Re-flash with `sysupgrade -n` to recreate
 
 ---
 
+## `harvest` Finds No Handshake
+
+### Symptom
+
+```
+[*] Listening on channel 6 for up to 180s...
+[!] No handshake captured.
+```
+
+or the unit is reported but skipped:
+
+```
+[!] Skipping AA:BB:CC:DD:EE:FF / 12:22:33:44:55:66: ESSID unknown (no beacon captured for AA:BB:CC:DD:EE:FF)
+```
+
+### Causes and fixes
+
+**1. The AP is not on the selected channel.** A single radio hears one channel
+at a time, so a deauth or a client re-association happening on channel 1 is
+invisible while the drone sits on 6. Confirm with `pwn4c networks` and pass the
+reported channel with `-c`.
+
+**2. Nobody re-associated.** `harvest` only listens; it does not kick anyone.
+Add `--deauth` (broadcast) or `--deauth --client <MAC>` to force a fresh 4-way
+handshake, then keep `--timeout` long enough for the client to come back.
+
+**3. The network uses PMF or WPA3-SAE.** 802.11w protects deauth/disassoc with a
+MIC, so the kick is ignored, and WPA3-SAE has no classic 4-way PSK handshake to
+harvest at all. `harvest` cannot produce a hashcat 22000 line for SAE; only a
+WPA2-PSK network (optionally with PMF, if a client roams naturally) yields one.
+
+**4. The AP never sends a PMKID.** PMKID harvesting depends on the AP including
+the RSN PMKID KDE in M1. Many do; some do not. Without a client there is then
+nothing to capture — wait for a natural roaming event or use a client-side kick.
+
+**5. The ESSID was never learned.** A hashcat 22000 line needs the ESSID. The
+daemon learns it from any beacon or probe response captured while harvesting,
+so a beacon interval or two on the AP's channel is usually enough — but a hidden
+SSID stays unknown until a client reveals it.
+
+**6. The `-b` filter hides the unit.** `-b` filters host-side; if the handshake
+belongs to another BSSID on the same channel, drop the flag or target the right
+AP.
+
+### Verification
+
+```bash
+# Is the radio actually on the AP's channel?
+pwn4c status
+
+# Which BSSIDs and channels are visible?
+pwn4c networks
+
+# Force a re-handshake and watch the units appear
+pwn4c harvest -b AA:BB:CC:DD:EE:FF -c 6 --deauth --timeout 60 -o hs.hc22000
+```
+
+---
+
 ## Dropped Frames on High-Traffic Channels
 
 ### Symptom

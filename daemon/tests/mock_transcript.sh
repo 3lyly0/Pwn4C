@@ -154,6 +154,35 @@ while time.time() < deadline:
 assert datagrams_rx >= 2, f"Expected >=2 datagrams, got {datagrams_rx}"
 print(f"    [assert UDP stream received {datagrams_rx} frames: PASS]")
 
+# 7. Handshake harvesting: the daemon injects one synthetic beacon + M1/M2
+# pair in mock mode, so a ready pair must show up without any radio.
+hs = None
+for _ in range(20):
+    hs = send_cmd({"id": "cmd-hs", "command": "GET_HANDSHAKES", "params": {}})
+    if hs.get("status") == "ok" and hs["data"]["count"] >= 1:
+        break
+    time.sleep(0.1)
+assert hs["status"] == "ok", f"GET_HANDSHAKES failed: {hs}"
+assert hs["data"]["count"] == 2, f"Expected 2 ready handshakes, got {hs}"
+assert hs["data"]["tracked"] == 2, f"Expected 2 tracked slots, got {hs}"
+units = hs["data"]["handshakes"]
+pmkid_unit = next((u for u in units if u["pmkid"]), None)
+eapol_unit = next((u for u in units if not u["pmkid"]), None)
+assert pmkid_unit is not None and eapol_unit is not None, units
+assert pmkid_unit["bssid"] == "02:00:00:DE:AD:01", pmkid_unit
+assert pmkid_unit["ssid"] == "mock-lab", pmkid_unit
+assert pmkid_unit["ssid_hex"] == "6d6f636b2d6c6162", pmkid_unit
+assert len(pmkid_unit["pmkid"]) == 32, pmkid_unit
+assert eapol_unit["sta"] == "02:00:00:BE:EF:03", eapol_unit
+assert eapol_unit["message_pair"] == 0, eapol_unit
+assert len(eapol_unit["anonce"]) == 64 and len(eapol_unit["mic"]) == 32, eapol_unit
+assert len(eapol_unit["eapol"]) == 198 and eapol_unit["eapol_len"] == 99, eapol_unit
+print("    [assert GET_HANDSHAKES: 1 PMKID + 1 M1+M2 pair: PASS]")
+
+hsr = send_cmd({"id": "cmd-hs-reset", "command": "GET_HANDSHAKES", "params": {"reset": True}})
+assert hsr["status"] == "ok" and hsr["data"]["count"] == 0, hsr
+print("    [assert GET_HANDSHAKES reset clears the table: PASS]")
+
 hop_stop = send_cmd({"id": "cmd-7", "command": "HOP_STOP", "params": {}})
 assert hop_stop["status"] == "ok" and hop_stop["data"]["hop_active"] is False
 print("    [assert HOP_STOP: PASS]")

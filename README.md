@@ -22,10 +22,11 @@ Pwn4C converts a stock Xiaomi Mi Router 4C (MediaTek MT7628N, ~$15 USD) into a h
 - **Kernel Classic BPF Frame Filtering (`--mgmt-only`, `--filter-bssid`)**: Attaches classic BPF bytecode (`SO_ATTACH_FILTER`) to the `AF_PACKET` socket in kernel space, filtering Management frames or target BSSIDs across Addr1/Addr2/Addr3 (preserving Data and WPA/EAPOL handshakes).
 - **Live Wireshark Pipe Streaming (`pwn4c monitor -o -`)**: Streams standard `DLT_IEEE802_11_RADIO` PCAP records directly to `stdout` for real-time inspection in Wireshark (`pwn4c monitor -c 6 -o - | wireshark -k -i -`).
 - **Active 802.11 Frame Injection & Deauth (`pwn4c deauth`)**: Enqueues raw 802.11 management frames into a 256-slot non-blocking TX ring buffer with configurable inter-frame pacing (`--interval`), full RadioTap TX metadata (rate/channel), and `--reverse` / `--disassoc` variants. Every burst reports requested / queued / sent / failed / pending frames, so a shortfall is never hidden.
+- **Handshake & PMKID Harvesting (`pwn4c harvest`)**: The drone decodes EAPOL-Key frames as they arrive, tracks the 4-way handshake per `(BSSID, STA)` pair and lifts the RSN PMKID from M1 when the AP advertises one. As soon as a crackable unit exists the CLI stops and writes a ready **hashcat mode-22000** line — no PCAP post-mortem and no external `hcxtools` step. Both `WPA*01*` (PMKID, clientless) and `WPA*02*` (M1+M2 / M1+M4 / M3+M2 / M3+M4) forms are produced, and `--deauth` can kick a client to force a fresh handshake.
 - **Hardware-Level RF Control & Self-Healing (`pwn4c config`, `pwn4c status`)**: Direct `nl80211` and POSIX `ioctl` control over transmission power (1–20 dBm) and dynamic MAC spoofing/randomization; changes are read back from the driver and persisted to UCI, so the CLI reports what the hardware actually applied. Automatic interface recovery on `ENETDOWN`/`ENODEV`, runtime netdev detection (`phy0-ap0` on OpenWrt 23.05, `wlan0` on older images), and full drop telemetry (`rx_frames`, `inject_frames`, `ring_overruns`, `kernel_drops`, `iface_recoveries`).
 - **Wi-Fi Survey & Station Mode (`pwn4c networks`, `pwn4c connect`)**: The drone sweeps the 2.4 GHz band from monitor mode and reports every AP — hidden networks included, with their advertised SSID length — then can join an upstream network as a station (hidden SSIDs supported) without ever touching the stock AP profile. By default it also NATs `192.168.4.0/24` behind that link, so a host plugged into a LAN port gets internet through the drone's Wi-Fi.
 - **Verified OTA Firmware Updates (`pwn4c upgrade`)**: Push a sysupgrade image from the host over the control channel; the drone verifies size and SHA-256 before flashing and comes back online on the new firmware.
-- **Interactive Shell (`pwn4c shell`)**: One persistent control session with a numbered menu — survey, select, join, listen, deauth-then-capture — instead of chains of separate commands and reconnects.
+- **Interactive Shell (`pwn4c shell`)**: One persistent control session with a numbered menu — survey, select, join, listen, deauth-then-capture, and handshake harvest — instead of chains of separate commands and reconnects.
 
 ---
 
@@ -39,6 +40,7 @@ Pwn4C converts a stock Xiaomi Mi Router 4C (MediaTek MT7628N, ~$15 USD) into a h
 | `monitor` | `pwn4c monitor [target_ip] -c 6 -o capture.pcap [--hop] [--seconds 60] [--persist]` | Starts 802.11 monitor mode, optional BPF filter/hopper, and streams PCAP |
 | `hop` | `pwn4c hop [target_ip] -d 250 -c 1,6,11` | Starts autonomous drone-side channel hopping across specified channels |
 | `deauth` | `pwn4c deauth [target_ip] -b <bssid> [-c <client>] [--rate 5.5] [--reverse] [--disassoc] [--monitor -o hs.pcap]` | Injects raw IEEE 802.11 deauth/disassoc frames; `--monitor` captures the handshake in the same session |
+| `harvest` | `pwn4c harvest [target_ip] -b <bssid> -c 6 --timeout 180 -o hs.hc22000 [--deauth] [--all]` | Captures a 4-way handshake or PMKID and writes hashcat mode-22000 output |
 | `config` | `pwn4c config [target_ip] --power 20 --mac` | Adjusts TX power, randomizes/spoofs MAC, or restores normal mode |
 | `networks` | `pwn4c networks [-d 4000] [--wps] [--json]` | Surveys nearby APs from the monitor radio (hidden SSIDs shown with their length, WPS flags reported) |
 | `connect` | `pwn4c connect <ssid> [-p pass] [--mac <addr>] [--random-mac] [--retry 2] [--no-share]` | Joins the drone to an upstream Wi-Fi network and NATs its LAN behind the link (station mode, hidden SSIDs OK) |
@@ -113,6 +115,12 @@ pwn4c deauth -b AA:BB:CC:DD:EE:FF -c 12:22:33:44:55:66 -i 6 --monitor --filter-b
 # Inject 20 deauth frames against target AP client with 10ms pacing
 pwn4c deauth -b AA:BB:CC:DD:EE:FF -c 12:22:33:44:55:66 -i 6 -n 20 --interval 10
 
+# Harvest a crackable handshake (or PMKID) and write a hashcat 22000 file.
+# Without --deauth the command simply listens; with it, clients are kicked so
+# they re-handshake immediately. It exits as soon as one unit is ready.
+pwn4c harvest -b AA:BB:CC:DD:EE:FF -c 6 --timeout 180 -o hs.hc22000 --deauth
+hashcat -m 22000 -a 0 hs.hc22000 wordlist.txt
+
 # Maximize TX power and randomize drone MAC (bare --mac = random)
 pwn4c config --power 20 --mac
 ```
@@ -140,6 +148,7 @@ pwn4c shell
 #   2) networks   -> survey
 #   3) use 1      -> pick a target network
 #   8) deauth     -> burst + capture (asks for the client MAC)
+#   9) harvest    -> capture a crackable handshake/PMKID, write hashcat 22000
 #   q) quit
 ```
 

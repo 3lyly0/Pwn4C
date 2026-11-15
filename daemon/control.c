@@ -507,6 +507,10 @@ static void cmd_start_monitor(daemon_t *d, const char *id, const char *params)
     d->frames_dropped  = 0;
     d->stream_seq      = 0;
 
+    /* A new session starts with an empty harvest table: results from the
+     * previous capture stay readable until the next START_MONITOR. */
+    hs_reset();
+
     /*
      * Session lifetime.  `persist` keeps the radio capturing after this
      * control client goes away (useful for a detached listen); `ttl_sec`
@@ -1066,6 +1070,32 @@ static void cmd_get_diagnostics(daemon_t *d, const char *id)
     send_ok(d, id, data);
 }
 
+/* ── Handshake harvesting (GET_HANDSHAKES) ────────────────────────────────── */
+
+/*
+ * Reports only crackable units (complete pairs or a PMKID) so the host can
+ * write hashcat lines straight away. The table survives STOP_MONITOR, so a
+ * client may stop the radio and still collect what was captured.
+ */
+static void cmd_get_handshakes(daemon_t *d, const char *id, const char *params)
+{
+    bool        reset  = false;
+    int         offset = 0;
+    const char *json;
+
+    (void)json_get_bool(params, "reset", &reset);
+    (void)json_get_int(params, "offset", &offset);
+
+    json = hs_report(offset, reset, NULL);
+    if (!json) {
+        send_error(d, id, "INTERNAL_ERROR",
+                   "Failed to serialise the handshake table");
+        return;
+    }
+
+    send_ok(d, id, json);
+}
+
 /* ── Wi-Fi management (WIFI_SCAN / WIFI_CONNECT / WIFI_STATUS / DISCONNECT)  */
 
 static void cmd_wifi_scan(daemon_t *d, const char *id, const char *params)
@@ -1489,6 +1519,8 @@ int ctrl_handle_line(daemon_t *d, const char *line)
         cmd_reboot(d, id);
     } else if (strcmp(cmd, "GET_DIAGNOSTICS") == 0) {
         cmd_get_diagnostics(d, id);
+    } else if (strcmp(cmd, "GET_HANDSHAKES") == 0) {
+        cmd_get_handshakes(d, id, params);
     } else if (strcmp(cmd, "WIFI_SCAN") == 0) {
         cmd_wifi_scan(d, id, params);
     } else if (strcmp(cmd, "WIFI_CONNECT") == 0) {
