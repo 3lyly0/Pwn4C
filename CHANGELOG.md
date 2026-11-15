@@ -61,6 +61,20 @@ v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
   around the selected network (or a channel you type) and prints the same table
   as the CLI. The remaining entries shift down by one (`stop` is now 11,
   `reboot` 14).
+- **Frame floods (`pwn4c beacon-flood`, `pwn4c auth-flood`)**: pure host-side
+  builders in `internal/drone/flood.go` over the existing `SEND_INJECTION`
+  path — no daemon change. `beacon-flood` sends beacons with fresh locally
+  administered BSSIDs and plausible SSIDs (built-in router-name list plus a
+  random suffix, `--ssid`, `--ssid-file`, or `--hidden`) to bury the real
+  networks in a client's scan list. `auth-flood` sends Open System
+  authentication requests at one BSSID from random source MACs, exhausting the
+  AP's client state table; it prints an explicit denial-of-service warning.
+  Both accept `--count` (0 = until Ctrl+C), `--duration`, `--interval` and
+  `--rate`, and report a live frames-per-second line plus the final injection
+  count.
+- **`flood` in the interactive shell**: menu entry 11 asks for beacon or auth
+  and runs the same loop. The remaining entries shift down again (`stop` is now
+  12, `reboot` 15).
 
 ## [1.5.0] - 2026-11-15
 

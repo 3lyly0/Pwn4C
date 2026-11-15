@@ -620,6 +620,57 @@ pwn4c clients -c 6 -s 30 --json
 
 ---
 
+## A Flood Has No Visible Effect
+
+### Symptom
+
+`pwn4c beacon-flood` or `pwn4c auth-flood` reports frames on air, but a scan on
+another device looks unchanged and the target AP keeps working.
+
+### Causes and fixes
+
+**1. The frames went out on the wrong channel.** Injection happens on whatever
+channel the radio is tuned to. `-c` must be the channel of the target AP (for
+`auth-flood`) or any busy channel (for `beacon-flood`). Check with
+`pwn4c status`.
+
+**2. You are watching from the device being flooded.** A phone that is already
+associated does not rescan just because new beacons appear, and its UI keeps
+showing the connected network. Scan from a second device, or use
+`pwn4c networks` from another drone.
+
+**3. The drone's own AP is gone.** This router has one radio: monitor mode takes
+it down, so the network the drone was serving disappears while the flood runs.
+That is expected, not a failure.
+
+**4. The driver is dropping frames.** `pwn4c status` reports `inject_frames` and
+`inject_dropped`. A climbing drop counter means the queue is overflowing —
+raise `--interval` or lower `--count` per run.
+
+**5. The AP rate-limits authentication.** Modern APs (and most WIDS) cap the
+number of half-open authentication entries, so an auth flood saturates at that
+cap instead of taking the AP down. That is the correct, intended behaviour of
+the defence; the flood is still the way to measure where the cap is.
+
+**6. The PHY rate is wrong for the environment.** Management frames normally go
+out at 1 Mbps CCK. In a noisy band or on a long link, `--rate 6` (OFDM) is
+sometimes received more reliably.
+
+### Verification
+
+```bash
+# Are frames actually leaving the radio?
+pwn4c status | grep -i inject
+
+# 500 beacons on the AP's channel, then scan from another device
+pwn4c beacon-flood -c 6 -n 500
+
+# Auth flood one AP and watch its client table behaviour
+pwn4c auth-flood -b AA:BB:CC:DD:EE:FF -c 6 -n 500
+```
+
+---
+
 ## Dropped Frames on High-Traffic Channels
 
 ### Symptom

@@ -132,19 +132,9 @@ func BuildCSAFrame(p CSAParams) (string, error) {
 		fc = 0x80 // Beacon
 		addr1 = net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 
-		body = make([]byte, 0, 12+2+len(ssid)+6+3+len(csa))
-		body = append(body, 0, 0, 0, 0, 0, 0, 0, 0) // timestamp
-		body = append(body, 0x64, 0x00)             // beacon interval: 100 TU
-		// Capability: ESS | Privacy | Short Preamble | Short Slot Time. An AP
-		// that is a WPA2 PSK network advertises privacy; clients that are
-		// associated already know the real value.
-		body = append(body, 0x31, 0x04)
-
-		body = append(body, ieSSID, byte(len(ssid)))
-		body = append(body, ssid...)
-		body = append(body, ieSupportedRate, 4, 0x82, 0x84, 0x8b, 0x96)
-		body = append(body, ieDSParams, 1,
-			byte(normalizeChannel(p.Options.Channel)))
+		// The AP's own beacon with the CSA element appended: clients that are
+		// associated to this BSSID process it as if their AP sent it.
+		body = beaconBody(ssid, p.Options.Channel)
 		body = append(body, csa...)
 	}
 
