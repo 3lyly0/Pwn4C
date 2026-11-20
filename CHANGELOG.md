@@ -3,6 +3,38 @@
 All notable changes to Pwn4C are documented here. For releases prior to
 v1.2.0 see the [GitHub releases page](https://github.com/3lyly0/Pwn4C/releases).
 
+## [1.6.1] - 2026-11-20
+
+### Fixed
+- **Placeholder PMKIDs produced uncrackable hashes:** some APs send an M1 with a
+  PMKID KDE whose 16 bytes are all zero when they have no cached PMKID for the
+  station. The daemon reported it as a PMKID and `harvest`/`eviltwin` wrote a
+  `WPA*01*0000…` line that hashcat can never crack — discarding the complete
+  M1+M2 handshake the same unit also carried. The parser now ignores an
+  all-zero PMKID, and the host treats one from an older daemon as absent, so the
+  unit falls back to its `WPA*02` form. Covered by new assertions in
+  `tests/test_eapol.c` and `internal/drone/handshake_test.go`.
+- **`BUFFER_OVERFLOW` events could report a bogus count:** the "last reported"
+  drop counter was a function-static that survived `START_MONITOR`, while
+  `frames_dropped` was reset, so the first overflow of a new session could
+  underflow the `uint64` delta. The counters now live in `daemon_t`, reset with
+  each session, and the event is emitted at most once per second instead of on
+  every main-loop pass — a flood no longer spams the control stream.
+- **`pwn4c clients` showed stale station data:** the one-shot inventory deduped
+  by MAC but kept the first snapshot, so the table printed after the listen
+  showed the RSSI, frame count and age from the moment each station was first
+  heard. Each poll now refreshes the existing row, so the final table describes
+  the last poll. Covered by `TestMergeClientRefreshesSnapshot`.
+- **`pwn4c eviltwin` lost handshakes when the session later failed:** the CLI
+  exited on a session error before writing units it had already captured, and
+  the shell dropped the error when units existed. Both now write the captured
+  units first, then report the error; the shell also validates the passphrase
+  right after the hidden prompt instead of failing later inside the session.
+- **Inventory serialisation slack:** `CL_ENTRY_MAX` was smaller than the true
+  worst-case station entry; raised to 384 bytes so the page guard is honest.
+- **Generated hashcat files:** `.gitignore` now ignores `*.hc22000` (the default
+  `harvest`/`eviltwin` output lives in the working directory) and `/dist/`.
+
 ## [1.6.0] - 2026-11-15
 
 ### Added
