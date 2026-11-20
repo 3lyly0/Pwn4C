@@ -979,6 +979,10 @@ func (s *shellState) doEvilTwin() {
 		return
 	}
 	// Never trim: a passphrase may legitimately contain spaces.
+	if passphrase != "" && (len(passphrase) < 8 || len(passphrase) > 63) {
+		fmt.Println("[!] passphrase must be 8-63 characters (or empty for an open AP)")
+		return
+	}
 
 	hidden := s.askYN("[*] Hide the twin's SSID?", false)
 
@@ -1021,16 +1025,16 @@ func (s *shellState) doEvilTwin() {
 	// runEvilTwinSession stops the twin and any monitor it started; a session
 	// the operator already had running stays up.
 
-	if len(units) == 0 {
+	if len(units) > 0 {
+		if err := writeHarvest(units, outPath); err != nil {
+			fmt.Printf("[!] %v\n", err)
+		}
+	} else {
 		fmt.Println("[!] No handshake captured.")
 		printEvilTwinHints(passphrase != "")
-		if sessionErr != nil {
-			fmt.Printf("[!] %v\n", sessionErr)
-		}
-		return
 	}
-	if err := writeHarvest(units, outPath); err != nil {
-		fmt.Printf("[!] %v\n", err)
+	if sessionErr != nil {
+		fmt.Printf("[!] %v\n", sessionErr)
 	}
 }
 

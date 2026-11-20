@@ -56,6 +56,48 @@ func TestClientSummary(t *testing.T) {
 	}
 }
 
+func TestMergeClientRefreshesSnapshot(t *testing.T) {
+	var stations []drone.Client
+	index := make(map[string]int)
+
+	first := drone.Client{
+		STA:    "02:00:00:BE:EF:02",
+		Probed: true,
+		SSID:   "lab",
+		Frames: 1,
+		AgeMS:  0,
+	}
+	stations, isNew := mergeClient(stations, index, first)
+	if !isNew || len(stations) != 1 {
+		t.Fatalf("first merge: new=%v len=%d", isNew, len(stations))
+	}
+
+	// The same station, now associated and heard many more times. The MAC case
+	// differs so the key must be normalised.
+	fresh := drone.Client{
+		STA:        "02:00:00:be:ef:02",
+		BSSID:      "02:00:00:DE:AD:01",
+		Associated: true,
+		Probed:     true,
+		SSID:       "lab",
+		HasRSSI:    true,
+		RSSI:       -40,
+		Frames:     9,
+		AgeMS:      120,
+	}
+	stations, isNew = mergeClient(stations, index, fresh)
+	if isNew {
+		t.Fatal("known station reported as new")
+	}
+	if len(stations) != 1 {
+		t.Fatalf("merge duplicated the station: len=%d", len(stations))
+	}
+	if !stations[0].Associated || stations[0].Frames != 9 ||
+		stations[0].RSSI != -40 || stations[0].AgeMS != 120 {
+		t.Fatalf("snapshot not refreshed: %+v", stations[0])
+	}
+}
+
 // filterClients must apply the three filters and order associated stations
 // first, then by descending signal.
 func TestFilterClients(t *testing.T) {

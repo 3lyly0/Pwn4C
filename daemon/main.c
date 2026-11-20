@@ -412,15 +412,17 @@ int main(int argc, char *argv[])
                 }
             }
 
-            /* Push BUFFER_OVERFLOW async event if drops occurred */
-            if (g_daemon.frames_dropped > 0
+            /* Push BUFFER_OVERFLOW async event if drops occurred, at most once
+             * a second so a flood does not spam the control stream. */
+            if (g_daemon.frames_dropped > g_daemon.drops_reported
              && g_daemon.ctrl_client_fd >= 0) {
-                static uint64_t s_last_reported_drops;
-                if (g_daemon.frames_dropped != s_last_reported_drops) {
+                int64_t now_ms = util_monotonic_ms();
+                if (now_ms - g_daemon.drops_report_ms >= 1000) {
                     char ev[256];
                     uint64_t new_drops =
-                        g_daemon.frames_dropped - s_last_reported_drops;
-                    s_last_reported_drops = g_daemon.frames_dropped;
+                        g_daemon.frames_dropped - g_daemon.drops_reported;
+                    g_daemon.drops_reported  = g_daemon.frames_dropped;
+                    g_daemon.drops_report_ms = now_ms;
                     (void)snprintf(ev, sizeof(ev),
                         "{\"id\":null,\"event\":\"BUFFER_OVERFLOW\","
                         "\"data\":{"

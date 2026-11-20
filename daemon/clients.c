@@ -18,7 +18,7 @@
 #include <string.h>
 
 #define CL_REPORT_BUF  8192u
-#define CL_ENTRY_MAX   256u    /* worst-case serialised entry, with slack */
+#define CL_ENTRY_MAX   384u    /* worst-case serialised entry, with slack */
 
 typedef struct {
     bool     used;

@@ -213,6 +213,8 @@ typedef struct {
     uint64_t     frames_captured;
     uint64_t     frames_dropped;
     uint64_t     ring_overruns;         /* ring buffer drops (tail advance count)  */
+    uint64_t     drops_reported;        /* frames_dropped at last async event      */
+    int64_t      drops_report_ms;       /* monotonic ms of the last async event    */
     uint64_t     inject_frames;         /* frames accepted by the driver           */
     uint64_t     inject_failures;       /* injection TX failures                   */
     uint64_t     inject_requested;      /* frames requested by SEND_INJECTION      */

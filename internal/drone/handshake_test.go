@@ -26,6 +26,33 @@ func TestHandshakePMKIDLine(t *testing.T) {
 	}
 }
 
+// An all-zero PMKID is an AP placeholder, not a key. It must not produce a
+// WPA*01 line; the unit falls back to the handshake it also carries.
+func TestHandshakeZeroPMKIDFallsBack(t *testing.T) {
+	h := Handshake{
+		BSSID:       "AA:BB:CC:DD:EE:FF",
+		STA:         "02:00:00:BE:EF:02",
+		SSID:        "lab",
+		MessagePair: 0,
+		MIC:         strings.Repeat("11", 16),
+		ANonce:      strings.Repeat("A1", 32),
+		EAPOL:       strings.Repeat("22", 99),
+		PMKID:       strings.Repeat("00", 16),
+	}
+
+	if h.HasPMKID() {
+		t.Fatal("all-zero PMKID must be treated as absent")
+	}
+
+	line, err := h.Hashcat22000()
+	if err != nil {
+		t.Fatalf("Hashcat22000: %v", err)
+	}
+	if !strings.HasPrefix(line, "WPA*02*") {
+		t.Fatalf("line = %q, want a WPA*02 handshake line", line)
+	}
+}
+
 // A complete 4-way must render `WPA*02*` with the message-pair byte as the
 // final field.
 func TestHandshakeEAPOLLine(t *testing.T) {

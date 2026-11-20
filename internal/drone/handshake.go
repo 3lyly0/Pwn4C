@@ -91,9 +91,13 @@ func (c *ControlClient) GetAllHandshakes() ([]Handshake, error) {
 	return all, nil
 }
 
-// HasPMKID reports whether the unit carries a PMKID (crackable on its own).
+// HasPMKID reports whether the unit carries a usable PMKID (crackable on its
+// own). An all-zero PMKID is a placeholder some APs put in M1 when they have no
+// cached entry: hashcat cannot crack it, so it is treated as absent and the
+// unit falls back to its 4-way handshake.
 func (h Handshake) HasPMKID() bool {
-	return strings.TrimSpace(h.PMKID) != ""
+	v := strings.TrimSpace(h.PMKID)
+	return v != "" && strings.Trim(v, "0") != ""
 }
 
 // ESSIDHex returns the ESSID as hashcat expects it: raw bytes, lowercase hex.

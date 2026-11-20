@@ -3,6 +3,7 @@
 /pwn4c
 cmd/pwn4c/pwn4c
 cmd/pwn4c/pwn4c.exe
+/dist/
 
 # Local engineering notes / audit docs (not part of the public repo)
 /pwn4c_architecture_audit_report.md
@@ -29,6 +30,9 @@ output/
 # Runtime captures / logs
 *.pcap
 *.log
+
+# hashcat output written by harvest / eviltwin (default names live in CWD)
+*.hc22000
 
 # Go
 /vendor/

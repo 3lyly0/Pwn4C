@@ -171,6 +171,18 @@ static void test_pmkid_kde(void)
     CHECK("M1 pmkid eapol_len", m.eapol_len == 99u + 22u);
 }
 
+static void test_zero_pmkid_ignored(void)
+{
+    eapol_msg_t m;
+    size_t      n;
+
+    /* An AP that has no cached PMKID may still send the KDE, zero-filled. */
+    n = build_eapol(frame_buf, BSSID, STA, true, 0x008a, 0xa1, true);
+    memset(frame_buf + n - 16, 0, 16);
+    CHECK("M1 with zero pmkid parsed", eapol_parse_frame(frame_buf, n, &m) == 0);
+    CHECK("M1 zero pmkid ignored", !m.has_pmkid);
+}
+
 static void test_rejections(void)
 {
     eapol_msg_t m;
@@ -315,6 +327,7 @@ int run_eapol_tests(void)
     printf("── EAPOL-Key parser ──────────────────────────\n");
     test_message_classification();
     test_pmkid_kde();
+    test_zero_pmkid_ignored();
     test_rejections();
 
     printf("── Harvest table ─────────────────────────────\n");

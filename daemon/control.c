@@ -518,6 +518,8 @@ static void cmd_start_monitor(daemon_t *d, const char *id, const char *params)
     d->channel        = channel;
     d->frames_captured = 0;
     d->frames_dropped  = 0;
+    d->drops_reported  = 0;
+    d->drops_report_ms = 0;
     d->stream_seq      = 0;
 
     /* A new session starts with an empty harvest and client table: results

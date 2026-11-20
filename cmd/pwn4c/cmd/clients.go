@@ -155,10 +155,24 @@ START_MONITOR, so stopping the radio does not lose what was seen.`,
 	},
 }
 
+// mergeClient folds one poll into the inventory. A station already in the list
+// is replaced with the fresher snapshot, so the table printed when the listen
+// ends describes the last poll (RSSI, frame count, age) instead of the first
+// time the station was heard. It reports whether the station is new.
+func mergeClient(stations []drone.Client, index map[string]int, c drone.Client) ([]drone.Client, bool) {
+	key := strings.ToUpper(c.STA)
+	if i, ok := index[key]; ok {
+		stations[i] = c
+		return stations, false
+	}
+	index[key] = len(stations)
+	return append(stations, c), true
+}
+
 // collectClients polls the daemon until the deadline and returns every station
 // it has seen, reporting new ones as they appear.
 func collectClients(client *drone.ControlClient, channel, seconds int) []drone.Client {
-	seen := make(map[string]bool)
+	index := make(map[string]int)
 	var stations []drone.Client
 
 	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
@@ -171,12 +185,11 @@ func collectClients(client *drone.ControlClient, channel, seconds int) []drone.C
 			return stations
 		}
 		for _, c := range page {
-			key := strings.ToUpper(c.STA)
-			if seen[key] {
+			var isNew bool
+			stations, isNew = mergeClient(stations, index, c)
+			if !isNew {
 				continue
 			}
-			seen[key] = true
-			stations = append(stations, c)
 			fmt.Printf("[+] %s  %s\n", c.DisplaySTA(), clientSummary(c))
 		}
 		if time.Now().After(deadline) {

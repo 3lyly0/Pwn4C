@@ -82,13 +82,19 @@ Only impersonate networks you own or are explicitly authorized to test.`,
 			os.Exit(1)
 		}
 
+		if len(units) > 0 {
+			if werr := writeHarvest(units, eviltwinOutput); werr != nil {
+				fmt.Printf("[!] %v\n", werr)
+				os.Exit(1)
+			}
+		}
+		if err != nil {
+			fmt.Printf("[!] %v\n", err)
+			os.Exit(1)
+		}
 		if len(units) == 0 {
 			fmt.Println("[!] No handshake captured.")
 			printEvilTwinHints(eviltwinPassphrase != "")
-			os.Exit(1)
-		}
-		if err := writeHarvest(units, eviltwinOutput); err != nil {
-			fmt.Printf("[!] %v\n", err)
 			os.Exit(1)
 		}
 	},

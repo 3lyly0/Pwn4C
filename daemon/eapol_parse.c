@@ -75,6 +75,17 @@ static bool kde_find_pmkid(const uint8_t *data, size_t len, uint8_t out[16])
     return false;
 }
 
+/* A zero PMKID is a placeholder, not a key: hashcat cannot crack it. */
+static bool pmkid_is_zero(const uint8_t pmkid[16])
+{
+    size_t i;
+
+    for (i = 0; i < PMKID_LEN; i++) {
+        if (pmkid[i] != 0u) { return false; }
+    }
+    return true;
+}
+
 /* ── Frame parsing ────────────────────────────────────────────────────────── */
 
 /*
@@ -179,8 +190,19 @@ int eapol_parse_frame(const uint8_t *frame, size_t len, eapol_msg_t *out)
         if (kd_len >= RSN_KDE_OUI_LEN + PMKID_LEN
             && (size_t)EAPOL_KEY_MIN_LEN + (size_t)kd_len
                    <= (size_t)body_len + 4u) {
-            out->has_pmkid = kde_find_pmkid(eapol + EAPOL_KEY_MIN_LEN,
-                                            kd_len, out->pmkid);
+            if (kde_find_pmkid(eapol + EAPOL_KEY_MIN_LEN,
+                               kd_len, out->pmkid)) {
+                /*
+                 * Some APs emit a PMKID KDE with 16 zero bytes when they have
+                 * no cached PMKID for the station. That is not a usable PMKID,
+                 * so drop it and let the unit fall back to the 4-way handshake
+                 * it also carries.
+                 */
+                out->has_pmkid = !pmkid_is_zero(out->pmkid);
+                if (!out->has_pmkid) {
+                    memset(out->pmkid, 0, PMKID_LEN);
+                }
+            }
         }
     }
 
